@@ -2,7 +2,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.database.supabase import supabase
+from app.services.inventory_service import get_inventory as get_inventory_service
 
 
 router = APIRouter(
@@ -13,7 +13,7 @@ router = APIRouter(
 
 @router.get("/")
 def get_inventory(
-    product_id: Optional[str] = Query(
+    product_id: Optional[int] = Query(
         None,
         description="Product ID"
     ),
@@ -31,29 +31,16 @@ def get_inventory(
     )
 ):
     try:
-        query = (
-            supabase
-            .table("inventory")
-            .select("*")
+        inventory = get_inventory_service(
+            product_id=product_id,
+            variant=variant,
+            color=color,
+            branch=branch
         )
-
-        if product_id:
-            query = query.eq("product_id", product_id)
-
-        if variant:
-            query = query.ilike("variant", variant)
-
-        if color:
-            query = query.ilike("color", color)
-
-        if branch:
-            query = query.ilike("branch", branch)
-
-        response = query.execute()
 
         return {
             "success": True,
-            "inventory": response.data
+            "inventory": inventory
         }
 
     except Exception as e:
