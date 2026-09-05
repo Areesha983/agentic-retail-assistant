@@ -4,3 +4,4 @@ supabase
 python-dotenv
 pydantic
 pytest==9.1.1
+ollama
