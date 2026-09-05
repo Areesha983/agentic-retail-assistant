@@ -1,6 +1,9 @@
 from fastapi import APIRouter, HTTPException, Query
 
-from app.database.supabase import supabase
+from app.services.product_service import (
+    list_products,
+    search_products as search_products_service,
+)
 
 
 router = APIRouter(
@@ -12,16 +15,9 @@ router = APIRouter(
 @router.get("/")
 def get_products():
     try:
-        response = (
-            supabase
-            .table("products")
-            .select("*")
-            .execute()
-        )
-
         return {
             "success": True,
-            "products": response.data
+            "products": list_products()
         }
 
     except Exception as e:
@@ -33,26 +29,20 @@ def get_products():
 
 @router.get("/search")
 def search_products(
-    q: str = Query(..., min_length=1, description="Product search query")
+    q: str = Query(..., min_length=1)
 ):
     try:
-        response = (
-            supabase
-            .table("products")
-            .select("*")
-            .or_(
-                f"name.ilike.%{q}%,"
-                f"brand.ilike.%{q}%,"
-                f"product_type.ilike.%{q}%"
-            )
-            .execute()
-        )
-
         return {
             "success": True,
             "query": q,
-            "products": response.data
+            "products": search_products_service(q)
         }
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e)
+        )
 
     except Exception as e:
         raise HTTPException(
