@@ -8,6 +8,7 @@ from app.api import (
     purchase,
     orders,
     support,
+    chat,
 )
 
 
@@ -24,6 +25,7 @@ app.include_router(sale_event.router)
 app.include_router(purchase.router)
 app.include_router(orders.router)
 app.include_router(support.router)
+app.include_router(chat.router)
 
 
 @app.get("/")
