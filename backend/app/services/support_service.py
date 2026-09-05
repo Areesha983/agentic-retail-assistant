@@ -2,7 +2,7 @@ from app.database.supabase import supabase
 
 
 def create_support_request(
-    user_id: int,
+    user_id: str,
     message: str,
     reason: str | None,
     priority: str
