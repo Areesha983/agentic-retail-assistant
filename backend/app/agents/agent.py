@@ -1393,7 +1393,7 @@ def run_smart_cart_workflow(
         "maximum_price": arguments["maximum_price"],
         "auto_buy_enabled": auto_buy_enabled,
     }
-    print("DEBUG FINAL ADD ARGUMENTS:", add_arguments)
+    
     add_result = execute_tool(
         "add_to_smart_cart",
         **add_arguments
