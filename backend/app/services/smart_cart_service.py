@@ -1,7 +1,7 @@
 from app.database.supabase import supabase
 
 
-def create_smart_cart(user_id: str):
+def create_smart_cart(user_id: int):
     response = (
         supabase
         .table("smart_carts")

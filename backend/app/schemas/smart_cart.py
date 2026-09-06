@@ -3,7 +3,7 @@ from typing import Optional
 
 
 class CreateSmartCartRequest(BaseModel):
-    user_id: str
+    user_id: int
 
 
 class AddSmartCartItemRequest(BaseModel):

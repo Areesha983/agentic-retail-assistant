@@ -12,9 +12,8 @@ ALLOWED_STATUSES = [
     "CANCELLED"
 ]
 
-
 def create_support_request(
-    user_id: str,
+    user_id: int,
     message: str,
     reason: Optional[str] = None,
     priority: str = "MEDIUM",
@@ -23,27 +22,38 @@ def create_support_request(
     Controlled agent tool for creating a customer support request.
     """
 
-    if not isinstance(user_id, str) or not user_id.strip():
-        raise ValueError("User ID cannot be empty")
+    if type(user_id) is not int or user_id <= 0:
+        raise ValueError(
+            "User ID must be a positive integer"
+        )
 
     if not isinstance(message, str) or not message.strip():
-        raise ValueError("Support message cannot be empty")
+        raise ValueError(
+            "Support message cannot be empty"
+        )
 
     if not isinstance(priority, str):
-        raise ValueError("Priority must be a string")
+        raise ValueError(
+            "Priority must be a string"
+        )
 
     priority = priority.strip().upper()
 
     if priority not in ALLOWED_PRIORITIES:
-        raise ValueError("Invalid priority")
+        raise ValueError(
+            "Invalid priority"
+        )
 
     if reason is not None:
         if not isinstance(reason, str):
-            raise ValueError("Reason must be a string")
+            raise ValueError(
+                "Reason must be a string"
+            )
+
         reason = reason.strip() or None
 
     request = support_service.create_support_request(
-        user_id=user_id.strip(),
+        user_id=user_id,
         message=message.strip(),
         reason=reason,
         priority=priority
@@ -55,16 +65,19 @@ def create_support_request(
     }
 
 
-def view_support_requests(user_id: str):
+def view_support_requests(user_id: int):
     """
-    Controlled agent tool for viewing a user's support requests.
+    Controlled agent tool for viewing a user's
+    support requests.
     """
 
-    if not isinstance(user_id, str) or not user_id.strip():
-        raise ValueError("User ID cannot be empty")
+    if type(user_id) is not int or user_id <= 0:
+        raise ValueError(
+            "User ID must be a positive integer"
+        )
 
     requests = support_service.get_support_requests(
-        user_id.strip()
+        user_id
     )
 
     return {

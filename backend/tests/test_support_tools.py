@@ -6,7 +6,7 @@ from app.tools import support_tools
 def test_create_support_request(monkeypatch):
     fake_request = {
         "request_id": 1,
-        "user_id": "user-123",
+        "user_id": 1001,
         "message": "My order has an issue",
         "reason": "ORDER",
         "priority": "HIGH",
@@ -14,7 +14,7 @@ def test_create_support_request(monkeypatch):
     }
 
     def fake_create(**kwargs):
-        assert kwargs["user_id"] == "user-123"
+        assert kwargs["user_id"] == 1001
         assert kwargs["message"] == "My order has an issue"
         assert kwargs["priority"] == "HIGH"
         return fake_request
@@ -26,7 +26,7 @@ def test_create_support_request(monkeypatch):
     )
 
     result = support_tools.create_support_request(
-        user_id="user-123",
+        user_id=1001,
         message="My order has an issue",
         reason="ORDER",
         priority="high"
@@ -42,7 +42,7 @@ def test_create_support_rejects_empty_message():
         match="message cannot be empty"
     ):
         support_tools.create_support_request(
-            user_id="user-123",
+            user_id=1001,
             message="   "
         )
 
@@ -53,7 +53,7 @@ def test_create_support_rejects_invalid_priority():
         match="Invalid priority"
     ):
         support_tools.create_support_request(
-            user_id="user-123",
+            user_id=1001,
             message="Help",
             priority="SUPER_HIGH"
         )
@@ -77,7 +77,7 @@ def test_view_support_requests(monkeypatch):
         lambda user_id: fake_requests
     )
 
-    result = support_tools.view_support_requests("user-123")
+    result = support_tools.view_support_requests(1001)
 
     assert result["success"] is True
     assert result["count"] == 2
@@ -116,3 +116,31 @@ def test_update_support_rejects_invalid_status():
             request_id=1,
             status="UNKNOWN"
         )
+
+def test_create_support_rejects_string_user_id():
+    with pytest.raises(
+        ValueError,
+        match="User ID must be a positive integer"
+    ):
+        support_tools.create_support_request(
+            user_id="1001",
+            message="Help"
+        )
+
+
+def test_create_support_rejects_non_positive_user_id():
+    with pytest.raises(
+        ValueError,
+        match="User ID must be a positive integer"
+    ):
+        support_tools.create_support_request(
+            user_id=0,
+            message="Help"
+        )
+
+def test_view_support_requests_rejects_invalid_user_id():
+    with pytest.raises(
+        ValueError,
+        match="User ID must be a positive integer"
+    ):
+        support_tools.view_support_requests("1001")        

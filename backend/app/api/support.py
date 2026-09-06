@@ -47,7 +47,7 @@ def create_request(request: CreateSupportRequest):
 
 
 @router.get("/{user_id}")
-def get_requests(user_id: str):
+def get_requests(user_id: int):
     try:
         requests = get_support_requests(user_id)
 

@@ -2,7 +2,7 @@ from app.database.supabase import supabase
 
 
 def create_support_request(
-    user_id: str,
+    user_id: int,
     message: str,
     reason: str | None,
     priority: str
@@ -31,7 +31,7 @@ def create_support_request(
     return response.data[0]
 
 
-def get_support_requests(user_id: str):
+def get_support_requests(user_id: int):
     response = (
         supabase
         .table("support_requests")

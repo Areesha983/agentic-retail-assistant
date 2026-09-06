@@ -1,7 +1,7 @@
 from app.database.supabase import supabase
 
 
-def get_orders_by_user(user_id: str):
+def get_orders_by_user(user_id: int):
     response = (
         supabase
         .table("orders")

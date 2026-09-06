@@ -18,7 +18,7 @@ router = APIRouter(
 
 
 @router.get("/{user_id}")
-def get_user_orders(user_id: str):
+def get_user_orders(user_id: int):
     try:
         orders = get_orders_by_user(user_id)
 
