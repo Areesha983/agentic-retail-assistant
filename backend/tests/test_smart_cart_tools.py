@@ -6,12 +6,12 @@ from app.tools import smart_cart_tools
 def test_create_smart_cart(monkeypatch):
     fake_cart = {
         "cart_id": 1,
-        "user_id": "user-123",
+        "user_id": 1001,
         "status": "ACTIVE"
     }
 
     def fake_create(user_id):
-        assert user_id == "user-123"
+        assert user_id == 1001
         return fake_cart
 
     monkeypatch.setattr(
@@ -20,18 +20,26 @@ def test_create_smart_cart(monkeypatch):
         fake_create
     )
 
-    result = smart_cart_tools.create_smart_cart("user-123")
+    result = smart_cart_tools.create_smart_cart(1001)
 
     assert result["success"] is True
     assert result["cart"] == fake_cart
 
 
-def test_create_smart_cart_rejects_empty_user():
+def test_create_smart_cart_rejects_invalid_user():
     with pytest.raises(
         ValueError,
-        match="cannot be empty"
+        match="positive integer"
     ):
-        smart_cart_tools.create_smart_cart("   ")
+        smart_cart_tools.create_smart_cart(0)
+
+
+def test_create_smart_cart_rejects_non_integer_user():
+    with pytest.raises(
+        ValueError,
+        match="positive integer"
+    ):
+        smart_cart_tools.create_smart_cart("user-123")
 
 
 def test_add_to_smart_cart(monkeypatch):
@@ -94,7 +102,7 @@ def test_view_smart_cart(monkeypatch):
     fake_result = {
         "cart": {
             "cart_id": 1,
-            "user_id": "user-123",
+            "user_id": 1001,
             "status": "ACTIVE"
         },
         "items": [

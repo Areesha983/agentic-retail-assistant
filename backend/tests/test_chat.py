@@ -8,8 +8,9 @@ client = TestClient(app)
 
 
 def test_chat_endpoint(monkeypatch):
-    def fake_run_agent(message):
+    def fake_run_agent(message, user_id):
         assert message == "Find Nike Air Max"
+        assert user_id == 1001
 
         return {
             "success": True,
@@ -37,6 +38,7 @@ def test_chat_endpoint(monkeypatch):
     response = client.post(
         "/chat/",
         json={
+            "user_id": 1001,
             "message": "Find Nike Air Max"
         }
     )
@@ -56,7 +58,9 @@ def test_chat_endpoint(monkeypatch):
 
 
 def test_chat_rejects_blank_message(monkeypatch):
-    def fake_run_agent(message):
+    def fake_run_agent(message, user_id):
+        assert user_id == 1001
+
         raise ValueError(
             "User message cannot be empty"
         )
@@ -70,6 +74,7 @@ def test_chat_rejects_blank_message(monkeypatch):
     response = client.post(
         "/chat/",
         json={
+            "user_id": 1001,
             "message": "   "
         }
     )
@@ -83,7 +88,20 @@ def test_chat_rejects_blank_message(monkeypatch):
 def test_chat_requires_message():
     response = client.post(
         "/chat/",
-        json={}
+        json={
+            "user_id": 1001
+        }
+    )
+
+    assert response.status_code == 422
+
+
+def test_chat_requires_user_id():
+    response = client.post(
+        "/chat/",
+        json={
+            "message": "Find Nike Air Max"
+        }
     )
 
     assert response.status_code == 422

@@ -18,7 +18,8 @@ def chat_with_agent(request: ChatRequest):
 
     try:
         result = run_agent(
-            request.message
+            request.message,
+            user_id=request.user_id
         )
 
         return result

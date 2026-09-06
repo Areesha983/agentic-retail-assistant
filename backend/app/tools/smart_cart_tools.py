@@ -3,18 +3,13 @@ from typing import Optional
 from app.services import smart_cart_service
 
 
-def create_smart_cart(user_id: str):
+def create_smart_cart(user_id: int):
     """
     Controlled agent tool for creating a Smart Cart.
     """
 
-    if not isinstance(user_id, str):
-        raise ValueError("User ID must be a string")
-
-    user_id = user_id.strip()
-
-    if not user_id:
-        raise ValueError("User ID cannot be empty")
+    if type(user_id) is not int or user_id <= 0:
+        raise ValueError("User ID must be a positive integer")
 
     cart = smart_cart_service.create_smart_cart(user_id)
 
