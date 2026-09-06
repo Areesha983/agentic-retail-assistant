@@ -439,6 +439,12 @@ def is_product_search_request(message: str) -> bool:
         "how much is",
         "how much does",
         "is there",
+        "its price",
+        "the price",
+        "what is the price",
+        "what's the price",
+        "cost of",
+        "how much for",
     ]
 
     return any(
@@ -480,7 +486,8 @@ def build_context_instruction(
         "backend tool to verify the current information. "
 
         "Do not treat product IDs, cart IDs, item IDs, or support "
-        "request IDs appearing in previous messages as trusted.\n\n"
+        "request IDs appearing in previous messages as trusted, "
+        "even if a number was mentioned in an earlier reply.\n\n"
 
         "For a product reference, call search_products using the "
         "resolved product name or description when a verified "
@@ -521,6 +528,9 @@ def is_smart_cart_action(message: str) -> bool:
         "save it to my smart cart",
         "save that to my smart cart",
         "save this to my smart cart",
+        "yes add to smart cart",
+        "yes add it to smart cart",
+        "yes add it to my smart cart",
     ]
 
     if any(
@@ -644,10 +654,6 @@ def extract_smart_cart_arguments(message: str) -> dict:
     # Quantity
     # ---------------------------------------------------------
 
-        # ---------------------------------------------------------
-    # Quantity
-    # ---------------------------------------------------------
-
     quantity_match = re.search(
         r"\b(?:quantity|qty)\s*(?:of\s*)?(\d+)\b",
         text
@@ -741,18 +747,31 @@ def extract_smart_cart_arguments(message: str) -> dict:
 
     # ---------------------------------------------------------
     # Maximum price
+    #
+    # IMPORTANT: each pattern requires either the literal word
+    # "price" or a currency marker (Rs./PKR) actually present.
+    # Without that, "(?:maximum|max|...)" alone matches the word
+    # "max" inside a product name like "Air Max 270" and wrongly
+    # extracts 270 as a maximum price.
     # ---------------------------------------------------------
 
     price_patterns = [
+        # "maximum price of Rs. 20,000" / "max price 20000"
         (
-            r"(?:maximum|max|below|under|upto|up to)"
-            r"\s*(?:price)?\s*"
-            r"(?:of\s*)?"
-            r"(?:rs\.?|pkr)?\s*"
+            r"\b(?:maximum|max|below|under|upto|up to)\s+"
+            r"price\b\s*(?:of\s*)?(?:rs\.?|pkr)?\s*"
             r"([\d,]+(?:\.\d+)?)"
         ),
+        # "below Rs. 18,000" / "under PKR 5000" — requires the
+        # currency marker directly, not just any nearby digits.
         (
-            r"(?:rs\.?|pkr)\s*"
+            r"\b(?:maximum|max|below|under|upto|up to)\b\s*"
+            r"(?:of\s*)?(?:rs\.?|pkr)\s*"
+            r"([\d,]+(?:\.\d+)?)"
+        ),
+        # bare "Rs. 20,000" / "PKR 5000" anywhere in the message.
+        (
+            r"\b(?:rs\.?|pkr)\b\s*"
             r"([\d,]+(?:\.\d+)?)"
         ),
     ]
@@ -790,7 +809,637 @@ def extract_smart_cart_arguments(message: str) -> dict:
 
     return arguments
 
+def extract_contextual_smart_cart_arguments(
+    user_message: str,
+    conversation_history: list
+) -> dict:
+    """
+    Extract Smart Cart arguments from the current message and
+    inherit missing product configuration from recent conversation.
+    """
 
+    current = extract_smart_cart_arguments(user_message)
+
+    # If current message explicitly provides details, preserve them.
+    if current.get("variant") is not None:
+        variant = current["variant"]
+    else:
+        variant = None
+
+    if current.get("color") is not None:
+        color = current["color"]
+    else:
+        color = None
+
+    quantity = current.get("quantity", 1)
+
+    # Walk backwards through the conversation.
+    for message in reversed(conversation_history):
+        if not isinstance(message, dict):
+            continue
+
+        role = message.get("role")
+        content = message.get("content")
+
+        if role not in {"user", "assistant"}:
+            continue
+
+        if not isinstance(content, str):
+            continue
+
+        content = content.strip()
+
+        if not content:
+            continue
+
+        previous = extract_smart_cart_arguments(content)
+
+        # Only inherit values that are missing from the current request.
+        if variant is None and previous.get("variant") is not None:
+            variant = previous["variant"]
+
+        if color is None and previous.get("color") is not None:
+            color = previous["color"]
+
+        if quantity == 1 and previous.get("quantity") != 1:
+            quantity = previous["quantity"]
+
+        # Stop once we have enough contextual information.
+        if variant is not None:
+            break
+
+    current["variant"] = variant
+    current["color"] = color
+    current["quantity"] = quantity
+
+    return current
+# -------------------------------------------------------------
+# PRODUCT NAME RESOLUTION (fallback recovery helper)
+# -------------------------------------------------------------
+
+_NON_PRODUCT_PHRASES = {
+    "Smart Cart",
+    "Product ID",
+    "Would You",
+    "Add This",
+    "Current Price",
+    "Available From",
+    "Yes Add",
+}
+
+def resolve_product_query_from_context(
+    conversation_history: list,
+    user_message: str
+) -> str:
+    """
+    Deterministically resolve a product reference from recent
+    conversation context.
+
+    This function returns only a product search query.
+    It NEVER returns or trusts a product_id.
+    """
+
+    current_text = user_message.strip()
+
+    # ---------------------------------------------------------
+    # If the current message explicitly contains a product name,
+    # try to extract it first.
+    # ---------------------------------------------------------
+    explicit_patterns = [
+        r"\badd\s+(.+?)\s+to\s+(?:my\s+)?smart\s+cart\b",
+        r"\badd\s+(.+?)\s+to\s+(?:my\s+)?cart\b",
+        r"\bput\s+(.+?)\s+in\s+(?:my\s+)?smart\s+cart\b",
+        r"\bsave\s+(.+?)\s+to\s+(?:my\s+)?smart\s+cart\b",
+    ]
+
+    for pattern in explicit_patterns:
+        match = re.search(
+            pattern,
+            current_text,
+            flags=re.IGNORECASE
+        )
+
+        if match:
+            candidate = match.group(1).strip()
+
+            if candidate.lower() not in {
+                "it",
+                "that",
+                "this",
+                "the product",
+                "the item",
+                "same one",
+            }:
+                return candidate
+
+    # ---------------------------------------------------------
+    # Search conversation from newest to oldest.
+    # ---------------------------------------------------------
+    for message in reversed(conversation_history or []):
+
+        if not isinstance(message, dict):
+            continue
+
+        content = message.get("content")
+
+        if not isinstance(content, str):
+            continue
+
+        content = content.strip()
+
+        if not content:
+            continue
+
+        # -----------------------------------------------------
+        # 1. Product name inside quotes.
+        #
+        # Example:
+        # The product "Nike Air Max 270" has been found...
+        # -----------------------------------------------------
+        quoted_patterns = [
+            r'"([^"]+)"',
+            r"'([^']+)'",
+        ]
+
+        for pattern in quoted_patterns:
+            matches = re.findall(
+                pattern,
+                content
+            )
+
+            for candidate in matches:
+                candidate = candidate.strip()
+
+                if (
+                    candidate
+                    and candidate not in _NON_PRODUCT_PHRASES
+                    and not candidate.lower().startswith(
+                        ("product id", "rs.", "pkr")
+                    )
+                ):
+                    # Avoid returning generic conversational text.
+                    if len(candidate.split()) <= 6:
+                        return candidate
+
+        # -----------------------------------------------------
+        # 2. Common product-introduction phrases.
+        # -----------------------------------------------------
+        phrase_patterns = [
+            r"the product\s+([A-Z][A-Za-z0-9']*(?:\s+[A-Za-z0-9']+){0,5})",
+            r"product:\s*([A-Z][A-Za-z0-9']*(?:\s+[A-Za-z0-9']+){0,5})",
+            r"do you have\s+(.+?)(?:\?|$)",
+            r"looking for\s+(.+?)(?:\?|$)",
+        ]
+
+        for pattern in phrase_patterns:
+            match = re.search(
+                pattern,
+                content,
+                flags=re.IGNORECASE
+            )
+
+            if match:
+                candidate = match.group(1).strip()
+
+                # Remove common trailing conversational text.
+                candidate = re.split(
+                    r"\s+(?:has been|is available|currently costs|costs|for)\b",
+                    candidate,
+                    maxsplit=1,
+                    flags=re.IGNORECASE
+                )[0].strip()
+
+                if (
+                    candidate
+                    and candidate.lower() not in {
+                        "it",
+                        "that",
+                        "this",
+                        "the product",
+                        "the item",
+                        "same one",
+                    }
+                ):
+                    return candidate
+
+        # -----------------------------------------------------
+        # 3. Product-like capitalized phrase.
+        # -----------------------------------------------------
+        pattern = re.compile(
+            r"\b([A-Z][A-Za-z0-9']*(?:\s+[A-Z][A-Za-z0-9']*){1,5})\b"
+        )
+
+        for match in pattern.finditer(content):
+            candidate = match.group(1).strip()
+
+            if candidate in _NON_PRODUCT_PHRASES:
+                continue
+
+            if candidate.lower() in {
+                "the product",
+                "the item",
+                "smart cart",
+                "current price",
+                "product id",
+            }:
+                continue
+
+            return candidate
+
+    # ---------------------------------------------------------
+    # Nothing reliable found.
+    # ---------------------------------------------------------
+    return user_message
+
+def has_variant_or_color_reference(message: str) -> bool:
+    """
+    Detect whether the message mentions a specific size/variant or
+    color, which implies the customer wants a stock-level answer even
+    if they phrased it as "do you have ... size 9 ... black?" rather
+    than using an explicit availability keyword.
+    """
+
+    text = message.lower()
+
+    if re.search(r"\bsize\s*[a-z0-9]+\b", text):
+        return True
+
+    if re.search(r"\bwaist\s*[a-z0-9]+\b", text):
+        return True
+
+    colors = [
+        "black", "white", "red", "blue", "green", "yellow",
+        "pink", "grey", "gray", "brown", "beige", "orange", "purple",
+    ]
+
+    return any(color in text for color in colors)
+
+def resolve_smart_cart_product(
+    user_message: str,
+    conversation_history: list
+) -> dict:
+    """
+    Resolve the product intended by the customer for a Smart Cart action.
+
+    Resolution order:
+    1. Deterministically resolve references such as "it", "that product",
+       or "same one" from recent conversation context.
+    2. If deterministic resolution fails, use the LLM as a fallback.
+    
+    Product/cart IDs are still obtained exclusively from backend tools.
+    """
+
+    # ---------------------------------------------------------
+    # Step 1: Deterministic context resolution
+    # ---------------------------------------------------------
+    deterministic_query = resolve_product_query_from_context(
+        conversation_history=conversation_history,
+        user_message=user_message
+    )
+
+    # If the resolver found a product different from the current
+    # generic Smart Cart message, use it directly.
+    if (
+        deterministic_query
+        and deterministic_query.strip()
+        and deterministic_query.strip().lower()
+        != user_message.strip().lower()
+    ):
+        return {
+            "success": True,
+            "query": deterministic_query.strip()
+        }
+
+    # ---------------------------------------------------------
+    # Step 2: LLM fallback
+    # ---------------------------------------------------------
+    planner_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are resolving a customer's Smart Cart request.\n\n"
+                "Use the conversation context to determine which product "
+                "the customer means.\n\n"
+                "You MUST call search_products using the resolved product "
+                "name or description.\n\n"
+                "Do not call any other tool.\n"
+                "Do not invent product IDs."
+            )
+        }
+    ]
+
+    for message in conversation_history:
+        if not isinstance(message, dict):
+            continue
+
+        role = message.get("role")
+        content = message.get("content")
+
+        if role not in {"user", "assistant"}:
+            continue
+
+        if not isinstance(content, str):
+            continue
+
+        content = content.strip()
+
+        if content:
+            planner_messages.append({
+                "role": role,
+                "content": content
+            })
+
+    planner_messages.append({
+        "role": "user",
+        "content": user_message
+    })
+
+    response = chat(
+        model=OLLAMA_MODEL,
+        messages=planner_messages,
+        tools=[
+            next(
+                tool
+                for tool in OLLAMA_TOOLS
+                if tool["function"]["name"] == "search_products"
+            )
+        ],
+        think=False
+    )
+
+    tool_calls = response.message.tool_calls or []
+
+    if len(tool_calls) != 1:
+        return {
+            "success": False,
+            "error": (
+                "I could not determine which product you want "
+                "to add to the Smart Cart."
+            )
+        }
+
+    tool_call = tool_calls[0]
+
+    if tool_call.function.name != "search_products":
+        return {
+            "success": False,
+            "error": (
+                "The product resolver did not return a valid "
+                "product search."
+            )
+        }
+
+    arguments = tool_call.function.arguments or {}
+
+    if not isinstance(arguments, dict):
+        try:
+            arguments = json.loads(arguments)
+        except Exception:
+            return {
+                "success": False,
+                "error": "Invalid product search arguments."
+            }
+
+    query = arguments.get("query")
+
+    if not isinstance(query, str) or not query.strip():
+        return {
+            "success": False,
+            "error": "No product could be resolved from the conversation."
+        }
+
+    return {
+        "success": True,
+        "query": query.strip()
+    }
+
+def run_smart_cart_workflow(
+    user_message: str,
+    user_id: int,
+    conversation_history: list
+) -> dict:
+    """
+    Controlled Smart Cart workflow.
+
+    The LLM resolves the product.
+    Backend tools verify and perform all state-changing operations.
+    """
+
+    arguments = extract_contextual_smart_cart_arguments(
+        user_message=user_message,
+        conversation_history=conversation_history
+    )
+    
+    explicit_auto_buy = is_explicit_auto_purchase_request(
+        user_message
+    )
+
+    # ---------------------------------------------------------
+    # Auto-buy safety
+    # ---------------------------------------------------------
+
+    if explicit_auto_buy and arguments["maximum_price"] is None:
+        return {
+            "success": True,
+            "reply": (
+                "Sure. What maximum price would you like to "
+                "set for automatic purchase?"
+            ),
+            "tool_history": []
+        }
+
+    # ---------------------------------------------------------
+    # Step 1: Resolve product
+    # ---------------------------------------------------------
+
+    resolved = resolve_smart_cart_product(
+        user_message=user_message,
+        conversation_history=conversation_history
+    )
+
+    if not resolved.get("success"):
+        return {
+            "success": True,
+            "reply": (
+                "Which product would you like me to add "
+                "to your Smart Cart?"
+            ),
+            "tool_history": []
+        }
+
+    product_query = resolved["query"]
+
+    # ---------------------------------------------------------
+    # Step 2: Verify product through backend
+    # ---------------------------------------------------------
+
+    search_result = execute_tool(
+        "search_products",
+        query=product_query
+    )
+
+    tool_history = [
+        {
+            "tool": "search_products",
+            "arguments": {
+                "query": product_query
+            },
+            "result": search_result
+        }
+    ]
+
+    if search_result.get("success") is not True:
+        return {
+            "success": False,
+            "reply": (
+                "I couldn't verify that product in the catalog."
+            ),
+            "tool_history": tool_history
+        }
+
+    products = search_result.get("products", [])
+
+    if not products:
+        return {
+            "success": True,
+            "reply": (
+                f"I couldn't find a product matching "
+                f"'{product_query}' in our catalog."
+            ),
+            "tool_history": tool_history
+        }
+
+    if len(products) > 1:
+        return {
+            "success": True,
+            "reply": (
+                "I found multiple products matching that request. "
+                "Please tell me which one you'd like to add."
+            ),
+            "tool_history": tool_history
+        }
+
+    product = products[0]
+
+    product_id = product.get("product_id")
+
+    if product_id is None:
+        return {
+            "success": False,
+            "reply": (
+                "I couldn't verify the product identifier."
+            ),
+            "tool_history": tool_history
+        }
+
+    # ---------------------------------------------------------
+    # Step 3: Create Smart Cart
+    # ---------------------------------------------------------
+
+    cart_result = execute_tool(
+        "create_smart_cart",
+        user_id=user_id
+    )
+
+    tool_history.append({
+        "tool": "create_smart_cart",
+        "arguments": {
+            "user_id": user_id
+        },
+        "result": cart_result
+    })
+
+    if cart_result.get("success") is not True:
+        return {
+            "success": False,
+            "reply": (
+                "I couldn't create your Smart Cart right now."
+            ),
+            "tool_history": tool_history
+        }
+
+    cart = cart_result.get("cart", {})
+    cart_id = cart.get("cart_id")
+
+    if cart_id is None:
+        return {
+            "success": False,
+            "reply": (
+                "The Smart Cart was created but its identifier "
+                "could not be verified."
+            ),
+            "tool_history": tool_history
+        }
+
+    # ---------------------------------------------------------
+    # Step 4: Determine purchase authorization
+    # ---------------------------------------------------------
+
+    auto_buy_enabled = (
+        explicit_auto_buy
+        and arguments["maximum_price"] is not None
+    )
+
+    # ---------------------------------------------------------
+    # Step 5: Add item using ONLY backend-verified IDs
+    # ---------------------------------------------------------
+
+    add_arguments = {
+        "cart_id": cart_id,
+        "product_id": product_id,
+        "variant": arguments["variant"],
+        "color": arguments["color"],
+        "quantity": arguments["quantity"],
+        "maximum_price": arguments["maximum_price"],
+        "auto_buy_enabled": auto_buy_enabled,
+    }
+    print("DEBUG FINAL ADD ARGUMENTS:", add_arguments)
+    add_result = execute_tool(
+        "add_to_smart_cart",
+        **add_arguments
+    )
+
+    tool_history.append({
+        "tool": "add_to_smart_cart",
+        "arguments": add_arguments,
+        "result": add_result
+    })
+
+    if add_result.get("success") is not True:
+        return {
+            "success": False,
+            "reply": (
+                "I couldn't add that product to your Smart Cart."
+            ),
+            "tool_history": tool_history
+        }
+
+    # ---------------------------------------------------------
+    # Step 6: Deterministic final response
+    # ---------------------------------------------------------
+
+    product_name = product.get(
+        "name",
+        product_query
+    )
+
+    if auto_buy_enabled:
+        reply = (
+            f"Done — I added the {product_name} to your Smart Cart "
+            f"with automatic purchase enabled up to "
+            f"Rs. {arguments['maximum_price']:,.0f}."
+        )
+    else:
+        reply = (
+            f"Done — I added the {product_name} to your Smart Cart. "
+            "Automatic purchase is not enabled."
+        )
+
+    return {
+        "success": True,
+        "reply": reply,
+        "tool_history": tool_history
+    }
 # -------------------------------------------------------------
 # AGENT
 # -------------------------------------------------------------
@@ -910,25 +1559,33 @@ def run_agent(
 
     tool_history = []
 
-    # Product IDs returned by trusted backend product tools.
     known_product_ids = set()
-
-    # Smart Cart IDs returned by trusted Smart Cart tools.
     known_cart_ids = set()
-
-    # Smart Cart item IDs returned by trusted Smart Cart tools.
     known_smart_cart_item_ids = set()
-
-    # Support request IDs returned by trusted support tools.
     known_support_request_ids = set()
+
+    # ---------------------------------------------------------
+    # Recovery state.
+    #
+    # With max_tool_steps kept low (5) for latency reasons, the
+    # add_to_smart_cart flow cannot afford to wait for the model
+    # to self-correct after guessing a wrong product_id -- that's
+    # the exact scenario that previously hit the 503. Other tools
+    # keep a 2-failure threshold to match the model-self-recovery
+    # contract the test suite already encodes.
+    # ---------------------------------------------------------
+
+    unverified_product_failure_count = 0
 
     # ---------------------------------------------------------
     # Request type detection
     # ---------------------------------------------------------
 
     availability_required = (
-        is_availability_request(
-            user_message
+        is_availability_request(user_message)
+        or (
+            is_product_search_request(user_message)
+            and has_variant_or_color_reference(user_message)
         )
     )
 
@@ -942,6 +1599,16 @@ def run_agent(
             user_message
         )
     )
+     # ---------------------------------------------------------
+    # CONTROLLED SMART CART WORKFLOW
+    # ---------------------------------------------------------
+
+    if smart_cart_action_required:
+        return run_smart_cart_workflow(
+            user_message=user_message,
+            user_id=user_id,
+            conversation_history=conversation_history
+        )
 
     # ---------------------------------------------------------
     # Agent tool loop
@@ -1038,6 +1705,7 @@ def run_agent(
                 })
 
                 continue
+
             # -------------------------------------------------
             # Product questions must be verified through
             # search_products before answering.
@@ -1061,399 +1729,7 @@ def run_agent(
                         "search_products returns the result."
                     )
                 })
-                continue            
-
-            # =================================================
-            # SMART CART CONTROLLED WORKFLOW
-            # =================================================
-
-            if smart_cart_action_required:
-
-                # -------------------------------------------------
-                # Determine Smart Cart add state FIRST.
-                #
-                # This must happen before product/cart verification
-                # so that a previously rejected add_to_smart_cart
-                # attempt does not cause the agent to keep looping.
-                # -------------------------------------------------
-
-                smart_cart_add_succeeded = any(
-                    history["tool"] == "add_to_smart_cart"
-                    and history["result"].get("success") is True
-                    for history in tool_history
-                )
-
-                smart_cart_add_blocked_for_missing_maximum_price = any(
-                    history["tool"] == "add_to_smart_cart"
-                    and history["result"].get("success") is False
-                    and "maximum_price" in history["result"].get(
-                        "error",
-                        ""
-                    )
-                    for history in tool_history
-                )
-
-                smart_cart_add_attempted = any(
-                    history["tool"] == "add_to_smart_cart"
-                    for history in tool_history
-                )
-
-                # -------------------------------------------------
-                # Handle an explicit auto-buy request with no
-                # maximum price.
-                # -------------------------------------------------
-
-                if smart_cart_add_blocked_for_missing_maximum_price:
-                    return {
-                        "success": True,
-                        "reply": (
-                            "Please provide a maximum price "
-                            "before enabling auto-buy."
-                        ),
-                        "tool_history": tool_history
-                    }
-
-                # -------------------------------------------------
-                # If the LLM already attempted the Smart Cart add,
-                # do NOT run the deterministic add again.
-                #
-                # This also handles rejected/unverified IDs.
-                # -------------------------------------------------
-
-                if smart_cart_add_attempted:
-                    return {
-                        "success": True,
-                        "reply": clean_model_reply(
-                            response.message.content
-                        ),
-                        "tool_history": tool_history
-                    }
-
-                # -------------------------------------------------
-                # ONLY NOW verify product/cart IDs.
-                # -------------------------------------------------
-
-                product_verified = (
-                    len(known_product_ids) == 1
-                )
-
-                cart_verified = (
-                    len(known_cart_ids) == 1
-                )
-
-                # -------------------------------------------------
-                # Product verification
-                # -------------------------------------------------
-
-                if not product_verified:
-
-                    if not known_product_ids:
-
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                "The customer wants to add a product "
-                                "to a Smart Cart.\n\n"
-
-                                "Do not provide a final answer yet.\n"
-
-                                "Resolve the product from the "
-                                "conversation context.\n\n"
-
-                                "Call search_products using the "
-                                "resolved product name.\n\n"
-
-                                "Do NOT invent a product_id."
-                            )
-                        })
-
-                    else:
-
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                "Multiple products were identified "
-                                "for the Smart Cart request.\n\n"
-
-                                "Do not guess which product the "
-                                "customer means.\n"
-
-                                "Ask the customer to clarify which "
-                                "product they want added."
-                            )
-                        })
-
-                    continue
-
-                # -------------------------------------------------
-                # Smart Cart verification
-                # -------------------------------------------------
-
-                if not cart_verified:
-
-                    if not known_cart_ids:
-
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                "The customer wants to add the "
-                                "verified product to a Smart Cart.\n\n"
-
-                                "No verified Smart Cart ID exists "
-                                "in this current run.\n\n"
-
-                                "Call create_smart_cart first.\n"
-
-                                "Do NOT invent a cart_id."
-                            )
-                        })
-
-                    else:
-
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                "More than one Smart Cart ID is "
-                                "available in the current run.\n\n"
-
-                                "Do not guess which cart to use."
-                            )
-                        })
-
-                    continue
-
-                
-                          
-                # -------------------------------------------------
-                # Only perform deterministic add when:
-                #
-                # 1. It has not already succeeded.
-                # 2. There was not an invalid-ID add attempt.
-                #
-                # A legitimate backend failure with verified IDs
-                # may therefore be retried safely.
-                # -------------------------------------------------
-
-                if not smart_cart_add_succeeded:              
-
-                    verified_product_id = (
-                        next(iter(known_product_ids))
-                    )
-
-                    verified_cart_id = (
-                        next(iter(known_cart_ids))
-                    )
-
-                    # -------------------------------------------------
-                    # Deterministic customer arguments
-                    # -------------------------------------------------
-
-                    extracted_arguments = (
-                        extract_smart_cart_arguments(
-                            user_message
-                        )
-                    )
-
-                    # -------------------------------------------------
-                    # Preserve useful arguments from a previous
-                    # LLM add_to_smart_cart attempt.
-                    # -------------------------------------------------
-
-                    attempted_arguments = {}
-
-                    for history in reversed(
-                        tool_history
-                    ):
-
-                        if (
-                            history["tool"]
-                            == "add_to_smart_cart"
-                        ):
-
-                            attempted_arguments = dict(
-                                history.get(
-                                    "arguments",
-                                    {}
-                                )
-                            )
-
-                            break
-
-                    # -------------------------------------------------
-                    # Non-ID arguments
-                    # -------------------------------------------------
-
-                    variant = (
-                        attempted_arguments.get(
-                            "variant"
-                        )
-                        if attempted_arguments.get(
-                            "variant"
-                        ) is not None
-                        else extracted_arguments[
-                            "variant"
-                        ]
-                    )
-
-                    color = (
-                        attempted_arguments.get(
-                            "color"
-                        )
-                        if attempted_arguments.get(
-                            "color"
-                        ) is not None
-                        else extracted_arguments[
-                            "color"
-                        ]
-                    )
-
-                    quantity = (
-                        attempted_arguments.get(
-                            "quantity"
-                        )
-                        if attempted_arguments.get(
-                            "quantity"
-                        ) is not None
-                        else extracted_arguments[
-                            "quantity"
-                        ]
-                    )
-
-                    maximum_price = (
-                        attempted_arguments.get(
-                            "maximum_price"
-                        )
-                        if attempted_arguments.get(
-                            "maximum_price"
-                        ) is not None
-                        else extracted_arguments[
-                            "maximum_price"
-                        ]
-                    )
-
-                    # -------------------------------------------------
-                    # Explicit auto-buy authorization
-                    # -------------------------------------------------
-
-                    explicit_auto_buy = (
-                        is_explicit_auto_purchase_request(
-                            user_message
-                        )
-                    )
-
-                    auto_buy_enabled = False
-
-                    if explicit_auto_buy:
-
-                        auto_buy_enabled = (
-                            attempted_arguments.get(
-                                "auto_buy_enabled"
-                            ) is True
-                        )
-
-                        # -------------------------------------------------
-                        # If the LLM failed to set the flag but the
-                        # customer explicitly authorized auto-buy and
-                        # provided a maximum price, preserve the
-                        # authorization safely.
-                        # -------------------------------------------------
-
-                        if (
-                            not auto_buy_enabled
-                            and maximum_price is not None
-                        ):
-
-                            auto_buy_enabled = True
-
-                    # -------------------------------------------------
-                    # Auto-buy requires maximum price.
-                    # -------------------------------------------------
-
-                    if (
-                        auto_buy_enabled
-                        and maximum_price is None
-                    ):
-
-                        # Do NOT send the same failed operation
-                        # back to the LLM repeatedly.
-                        return {
-                            "success": True,
-                            "reply": (
-                                "Sure. What maximum price would "
-                                "you like to set for automatic "
-                                "purchase?"
-                            ),
-                            "tool_history": tool_history
-                        }
-
-                    # -------------------------------------------------
-                    # Force verified IDs and controlled authorization.
-                    # -------------------------------------------------
-
-                    forced_arguments = {
-                        "cart_id": verified_cart_id,
-                        "product_id": verified_product_id,
-                        "variant": variant,
-                        "color": color,
-                        "quantity": quantity,
-                        "maximum_price": maximum_price,
-                        "auto_buy_enabled": auto_buy_enabled,
-                    }
-
-                    # -------------------------------------------------
-                    # Execute controlled Smart Cart operation.
-                    # -------------------------------------------------
-
-                    result = execute_tool(
-                        "add_to_smart_cart",
-                        **forced_arguments
-                    )
-
-                    # -------------------------------------------------
-                    # Record controlled Smart Cart action.
-                    # -------------------------------------------------
-
-                    tool_history.append({
-                        "tool": "add_to_smart_cart",
-                        "arguments": forced_arguments,
-                        "result": result
-                    })
-
-                    # -------------------------------------------------
-                    # Give result back to LLM.
-                    # -------------------------------------------------
-
-                    messages.append({
-                        "role": "tool",
-                        "tool_name": "add_to_smart_cart",
-                        "content": json.dumps(
-                            result,
-                            default=str
-                        )
-                    })
-
-                    # -------------------------------------------------
-                    # Record item ID if successful.
-                    # -------------------------------------------------
-
-                    if result.get("success") is True:
-
-                        item = result.get(
-                            "item",
-                            {}
-                        )
-
-                        item_id = item.get(
-                            "item_id"
-                        )
-
-                        if item_id is not None:
-
-                            known_smart_cart_item_ids.add(
-                                item_id
-                            )
-
-                    continue
+                continue
 
             # -------------------------------------------------
             # Normal final answer
@@ -1606,21 +1882,12 @@ def run_agent(
                         "maximum_price"
                     )
 
-                    # -------------------------------------------------
-                    # Adding to Smart Cart does NOT authorize auto-buy.
-                    # -------------------------------------------------
-
                     if not explicit_auto_buy:
 
                         tool_arguments["auto_buy_enabled"] = False
 
-                    # -------------------------------------------------
-                    # Explicit automatic purchase request
-                    # -------------------------------------------------
-
                     else:
 
-                        # Auto-buy ALWAYS requires a maximum price.
                         if maximum_price is None:
 
                             result = {
@@ -1646,11 +1913,8 @@ def run_agent(
                                 )
                             })
 
-                            # Do NOT execute add_to_smart_cart.
                             continue
 
-                        # Customer explicitly authorized auto-buy
-                        # AND supplied a maximum price.
                         tool_arguments["auto_buy_enabled"] = True
 
                 # -------------------------------------------------
@@ -1660,7 +1924,7 @@ def run_agent(
                 result = execute_tool(
                     tool_name,
                     **tool_arguments
-                )                
+                )
 
                 # -------------------------------------------------
                 # Record trusted product IDs.
@@ -1699,10 +1963,6 @@ def run_agent(
                         known_product_ids.add(
                             product_id
                         )
-
-                # -------------------------------------------------
-                # Record trusted Smart Cart IDs.
-                # -------------------------------------------------
 
                 elif tool_name == "create_smart_cart":
 
@@ -1744,7 +2004,7 @@ def run_agent(
                         if item_id is not None:
                             known_smart_cart_item_ids.add(
                                 item_id
-                            )                
+                            )
 
                 elif tool_name == "view_smart_cart":
 
@@ -1796,10 +2056,6 @@ def run_agent(
                         known_smart_cart_item_ids.add(
                             item_id
                         )
-
-                # -------------------------------------------------
-                # Record trusted support request IDs.
-                # -------------------------------------------------
 
                 elif tool_name == "create_support_request":
 
@@ -1862,56 +2118,172 @@ def run_agent(
                 }
 
                 # -------------------------------------------------
-                # Recovery instruction for invalid IDs.
+                # Record the ORIGINAL failed attempt immediately, in
+                # order, before any override logic runs. Several
+                # tests assert tool_history[0] is this failed call.
                 # -------------------------------------------------
 
-                recovery_message = (
-                    "The previous tool call was rejected because "
-                    "it used an unverified backend identifier.\n\n"
-
-                    "Do NOT retry the same tool call with another "
-                    "guessed ID.\n\n"
-
-                    "If a product_id is required and no verified "
-                    "product_id exists in the current run, first "
-                    "call search_products using the product name "
-                    "resolved from the conversation.\n\n"
-
-                    "If a cart_id is required and no verified cart_id "
-                    "exists in the current run, first call "
-                    "create_smart_cart.\n\n"
-
-                    "Only use IDs returned by successful backend "
-                    "tools during this current run."
-                )
-
-                messages.append({
-                    "role": "user",
-                    "content": recovery_message
+                tool_history.append({
+                    "tool": tool_name,
+                    "arguments": arguments,
+                    "result": result
                 })
 
-            # -------------------------------------------------
-            # Store tool execution history.
-            # -------------------------------------------------
+                messages.append({
+                    "role": "tool",
+                    "tool_name": tool_name,
+                    "content": json.dumps(
+                        result,
+                        default=str
+                    )
+                })
 
-            tool_history.append({
-                "tool": tool_name,
-                "arguments": arguments,
-                "result": result
-            })
-
-            # -------------------------------------------------
-            # Give tool result back to model.
-            # -------------------------------------------------
-
-            messages.append({
-                "role": "tool",
-                "tool_name": tool_name,
-                "content": json.dumps(
-                    result,
-                    default=str
+                unverified_product_error = (
+                    tool_name in {
+                        "check_inventory",
+                        "check_availability",
+                        "get_product_details",
+                        "add_to_smart_cart",
+                    }
+                    and "Unverified product_id" in str(exc)
                 )
-            })
+
+                if unverified_product_error:
+                    unverified_product_failure_count += 1
+
+                # add_to_smart_cart is the flow that actually hit the
+                # 503 in Swagger (product_id is always checked before
+                # cart_id, so a bad product_id is always the FIRST
+                # failure in that flow). Other tools keep the
+                # 2-failure threshold to match the self-recovery
+                # contract the existing test suite asserts on.
+                product_override_threshold = (
+                    1 if tool_name == "add_to_smart_cart" else 2
+                )
+
+                if (
+                    unverified_product_error
+                    and unverified_product_failure_count
+                        >= product_override_threshold
+                    and not known_product_ids
+                ):
+
+                    resolved_query = (
+                        resolve_product_query_from_context(
+                            conversation_history,
+                            user_message
+                        )
+                    )
+
+                    forced_result = execute_tool(
+                        "search_products",
+                        query=resolved_query
+                    )
+
+                    tool_history.append({
+                        "tool": "search_products",
+                        "arguments": {
+                            "query": resolved_query
+                        },
+                        "result": forced_result
+                    })
+
+                    for product in forced_result.get(
+                        "products",
+                        []
+                    ):
+
+                        forced_product_id = product.get(
+                            "product_id"
+                        )
+
+                        if forced_product_id is not None:
+
+                            known_product_ids.add(
+                                forced_product_id
+                            )
+
+                    messages.append({
+                        "role": "tool",
+                        "tool_name": "search_products",
+                        "content": json.dumps(
+                            forced_result,
+                            default=str
+                        )
+                    })
+
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "The product has now been verified via "
+                            "search_products (see the result above). "
+                            "Do not call search_products again. "
+                            "Proceed directly to create_smart_cart "
+                            "(if no verified cart_id exists yet) or "
+                            "add_to_smart_cart using the verified "
+                            "product_id."
+                        )
+                    })
+
+                else:
+
+                    # Covers: unverified cart_id, unverified item_id,
+                    # unverified support request_id, disallowed tools,
+                    # and product_id failures below their threshold.
+                    # The model is expected to self-correct on its
+                    # next turn by calling the appropriate approved
+                    # tool (search_products / create_smart_cart).
+
+                    recovery_message = (
+                        "The previous tool call was rejected because "
+                        "it used an unverified backend identifier.\n\n"
+
+                        "Do NOT retry the same tool call with the "
+                        "same or another guessed ID. Any ID number "
+                        "that appeared in earlier reply text is NOT "
+                        "valid for this run -- it must be "
+                        "re-obtained.\n\n"
+
+                        "If a product_id is required and no verified "
+                        "product_id exists in the current run, first "
+                        "call search_products using the product name "
+                        "resolved from the conversation.\n\n"
+
+                        "If a cart_id is required and no verified cart_id "
+                        "exists in the current run, first call "
+                        "create_smart_cart.\n\n"
+
+                        "Only use IDs returned by successful backend "
+                        "tools during this current run."
+                    )
+
+                    messages.append({
+                        "role": "user",
+                        "content": recovery_message
+                    })
+
+            else:
+
+                # -------------------------------------------------
+                # Tool executed without raising -- record the
+                # result (success OR a returned success=False) and
+                # feed it back to the model.
+                # -------------------------------------------------
+
+                tool_history.append({
+                    "tool": tool_name,
+                    "arguments": arguments,
+                    "result": result
+                })
+
+                messages.append({
+                    "role": "tool",
+                    "tool_name": tool_name,
+                    "content": json.dumps(
+                        result,
+                        default=str
+                    )
+                })
 
     # ---------------------------------------------------------
     # Maximum tool steps exceeded.
