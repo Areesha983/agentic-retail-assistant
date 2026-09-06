@@ -27,7 +27,10 @@ def validate_purchase(smart_cart_item_id: int):
     if item["status"] != "WATCHING":
         return {
             "valid": False,
-            "reason": f"Smart Cart item is not WATCHING. Current status: {item['status']}"
+            "reason": (
+                f"Smart Cart item is not WATCHING. "
+                f"Current status: {item['status']}"
+            )
         }
 
     # --------------------------------------------------
@@ -74,7 +77,8 @@ def validate_purchase(smart_cart_item_id: int):
             "valid": False,
             "reason": (
                 f"Current price Rs. {current_price} "
-                f"is above maximum price Rs. {item['maximum_price']}"
+                f"is above maximum price Rs. "
+                f"{item['maximum_price']}"
             )
         }
 
@@ -109,21 +113,43 @@ def validate_purchase(smart_cart_item_id: int):
             "reason": "Required product variant/color is not available"
         }
 
-    # Calculate total available quantity
-    total_inventory = sum(
-        inventory["quantity"]
+    # Find one inventory location with enough stock.
+    # We do not combine inventory across different branches.
+    eligible_inventory = [
+        inventory
         for inventory in inventory_response.data
-    )
+        if inventory["quantity"] >= item["quantity"]
+    ]
 
-    if total_inventory < item["quantity"]:
+    if not eligible_inventory:
+        best_available = max(
+            (
+                inventory["quantity"]
+                for inventory in inventory_response.data
+            ),
+            default=0
+        )
+
         return {
             "valid": False,
             "reason": (
-                f"Insufficient inventory. "
+                "Insufficient inventory at a single location. "
                 f"Required: {item['quantity']}, "
-                f"Available: {total_inventory}"
+                f"Best available at one location: {best_available}"
             )
         }
+
+    # Choose deterministically:
+    # highest stock first, then lowest inventory_id.
+    selected_inventory = sorted(
+        eligible_inventory,
+        key=lambda inventory: (
+            -inventory["quantity"],
+            inventory["inventory_id"]
+        )
+    )[0]
+
+    available_inventory = selected_inventory["quantity"]
 
     # --------------------------------------------------
     # 7. Check duplicate purchase
@@ -156,7 +182,7 @@ def validate_purchase(smart_cart_item_id: int):
         .insert({
             "smart_cart_item_id": smart_cart_item_id,
             "price": current_price,
-            "inventory_available": total_inventory,
+            "inventory_available": available_inventory,
             "status": "VALIDATED",
             "reason": "All purchase validation checks passed"
         })
@@ -169,305 +195,88 @@ def validate_purchase(smart_cart_item_id: int):
         "smart_cart_item": item,
         "product": product,
         "current_price": current_price,
-        "inventory_available": total_inventory,
+        "inventory_available": available_inventory,
+        "selected_inventory": selected_inventory,
         "purchase_attempt": (
             attempt_response.data[0]
             if attempt_response.data
             else None
         )
     }
+
+
 def execute_purchase(smart_cart_item_id: int):
+    """
+    Execute an authorized Smart Cart purchase through
+    one atomic PostgreSQL transaction.
 
-    # --------------------------------------------------
-    # 1. Get Smart Cart Item
-    # --------------------------------------------------
+    The database RPC performs the final checks, inventory
+    update, order creation, Smart Cart status update,
+    and purchase-attempt update.
+    """
 
-    item_response = (
+    if type(smart_cart_item_id) is not int:
+        raise ValueError(
+            "Smart Cart item ID must be an integer"
+        )
+
+    if smart_cart_item_id <= 0:
+        raise ValueError(
+            "Smart Cart item ID must be greater than 0"
+        )
+
+    response = (
         supabase
-        .table("smart_cart_items")
-        .select("*")
-        .eq("item_id", smart_cart_item_id)
-        .execute()
-    )
-
-    if not item_response.data:
-        raise ValueError("Smart Cart item not found")
-
-    item = item_response.data[0]
-
-    # --------------------------------------------------
-    # 2. Make sure item is WATCHING
-    # --------------------------------------------------
-
-    if item["status"] != "WATCHING":
-        raise ValueError(
-            f"Smart Cart item cannot be purchased. "
-            f"Current status: {item['status']}"
-        )
-
-    # --------------------------------------------------
-    # 3. Make sure auto-buy is enabled
-    # --------------------------------------------------
-
-    if not item["auto_buy_enabled"]:
-        raise ValueError(
-            "Automatic purchase is not enabled"
-        )
-
-    # --------------------------------------------------
-    # 4. Get current product
-    # --------------------------------------------------
-
-    product_response = (
-        supabase
-        .table("products")
-        .select("*")
-        .eq("product_id", item["product_id"])
-        .execute()
-    )
-
-    if not product_response.data:
-        raise ValueError("Product not found")
-
-    product = product_response.data[0]
-
-    current_price = product["current_price"]
-
-    # --------------------------------------------------
-    # 5. Re-check maximum price
-    # --------------------------------------------------
-
-    if item["maximum_price"] is None:
-        raise ValueError(
-            "No maximum price specified"
-        )
-
-    if current_price > item["maximum_price"]:
-        raise ValueError(
-            f"Current price Rs. {current_price} "
-            f"exceeds maximum price Rs. "
-            f"{item['maximum_price']}"
-        )
-
-    # --------------------------------------------------
-    # 6. Find matching inventory
-    # --------------------------------------------------
-
-    inventory_query = (
-        supabase
-        .table("inventory")
-        .select("*")
-        .eq("product_id", item["product_id"])
-    )
-
-    if item["variant"] is not None:
-        inventory_query = inventory_query.eq(
-            "variant",
-            item["variant"]
-        )
-
-    if item["color"] is not None:
-        inventory_query = inventory_query.eq(
-            "color",
-            item["color"]
-        )
-
-    inventory_response = inventory_query.execute()
-
-    if not inventory_response.data:
-        raise ValueError(
-            "Required product variant/color is unavailable"
-        )
-
-    # Find an inventory location with enough stock
-    selected_inventory = None
-
-    for inventory in inventory_response.data:
-        if inventory["quantity"] >= item["quantity"]:
-            selected_inventory = inventory
-            break
-
-    if selected_inventory is None:
-        raise ValueError(
-            "Insufficient inventory"
-        )
-
-    # --------------------------------------------------
-    # 7. Prevent duplicate purchase
-    # --------------------------------------------------
-
-    existing_order = (
-        supabase
-        .table("orders")
-        .select("order_id")
-        .eq(
-            "smart_cart_item_id",
-            smart_cart_item_id
+        .rpc(
+            "execute_smart_cart_purchase",
+            {
+                "p_smart_cart_item_id":
+                    smart_cart_item_id
+            }
         )
         .execute()
     )
 
-    if existing_order.data:
+    result = response.data
+
+    # Depending on the Supabase/PostgREST response,
+    # normalize a one-item list if necessary.
+    if isinstance(result, list):
+        result = result[0] if result else None
+
+    if not isinstance(result, dict):
+        raise RuntimeError(
+            "Purchase transaction returned an invalid result"
+        )
+
+    # Preserve the existing service behavior:
+    # failed validation/purchase conditions raise an error,
+    # while successful purchases return the result.
+    if not result.get("success"):
         raise ValueError(
-            "This Smart Cart item has already been purchased"
+            result.get(
+                "reason",
+                "Purchase could not be completed"
+            )
         )
 
-    # --------------------------------------------------
-    # 8. Mark item as PROCESSING
-    # --------------------------------------------------
+    return result
 
-    supabase \
-        .table("smart_cart_items") \
-        .update({
-            "status": "PROCESSING"
-        }) \
-        .eq(
-            "item_id",
-            smart_cart_item_id
-        ) \
-        .execute()
-
-    try:
-
-        # --------------------------------------------------
-        # 9. Reduce inventory
-        # --------------------------------------------------
-
-        old_quantity = selected_inventory["quantity"]
-
-        new_quantity = (
-            old_quantity - item["quantity"]
-        )
-
-        inventory_update = (
-            supabase
-            .table("inventory")
-            .update({
-                "quantity": new_quantity
-            })
-            .eq(
-                "inventory_id",
-                selected_inventory["inventory_id"]
-            )
-            .execute()
-        )
-
-        if not inventory_update.data:
-            raise ValueError(
-                "Failed to update inventory"
-            )
-
-        # --------------------------------------------------
-        # 10. Create mock order
-        # --------------------------------------------------
-
-        order_response = (
-            supabase
-            .table("orders")
-            .insert({
-                "user_id": item["cart_id"],
-                "product_id": item["product_id"],
-                "smart_cart_item_id": smart_cart_item_id,
-                "variant": item["variant"],
-                "color": item["color"],
-                "quantity": item["quantity"],
-                "price": current_price,
-                "status": "CONFIRMED"
-            })
-            .execute()
-        )
-
-        if not order_response.data:
-            raise ValueError(
-                "Failed to create order"
-            )
-
-        order = order_response.data[0]
-
-        # --------------------------------------------------
-        # 11. Mark Smart Cart item as PURCHASED
-        # --------------------------------------------------
-
-        supabase \
-            .table("smart_cart_items") \
-            .update({
-                "status": "PURCHASED"
-            }) \
-            .eq(
-                "item_id",
-                smart_cart_item_id
-            ) \
-            .execute()
-
-        # --------------------------------------------------
-        # 12. Update purchase attempt
-        # --------------------------------------------------
-
-        attempt_response = (
-            supabase
-            .table("purchase_attempts")
-            .select("attempt_id")
-            .eq(
-                "smart_cart_item_id",
-                smart_cart_item_id
-            )
-            .order(
-                "timestamp",
-                desc=True
-            )
-            .limit(1)
-            .execute()
-        )
-
-        if attempt_response.data:
-
-            supabase \
-                .table("purchase_attempts") \
-                .update({
-                    "status": "SUCCESS",
-                    "reason": "Mock purchase completed successfully"
-                }) \
-                .eq(
-                    "attempt_id",
-                    attempt_response.data[0]["attempt_id"]
-                ) \
-                .execute()
-
-        # --------------------------------------------------
-        # 13. Return result
-        # --------------------------------------------------
-
-        return {
-            "success": True,
-            "message": "Mock purchase completed successfully",
-            "order": order,
-            "inventory_before": old_quantity,
-            "inventory_after": new_quantity
-        }
-
-    except Exception as e:
-
-        # If something fails, restore item status
-        supabase \
-            .table("smart_cart_items") \
-            .update({
-                "status": "WATCHING"
-            }) \
-            .eq(
-                "item_id",
-                smart_cart_item_id
-            ) \
-            .execute()
-
-        raise e
 
 def get_purchase_attempts(smart_cart_item_id: int):
+
     response = (
         supabase
         .table("purchase_attempts")
         .select("*")
-        .eq("smart_cart_item_id", smart_cart_item_id)
-        .order("timestamp", desc=True)
+        .eq(
+            "smart_cart_item_id",
+            smart_cart_item_id
+        )
+        .order(
+            "timestamp",
+            desc=True
+        )
         .execute()
     )
 

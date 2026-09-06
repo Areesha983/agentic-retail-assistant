@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from app.database.supabase import supabase
 
 
@@ -27,7 +29,6 @@ def add_item_to_smart_cart(
     maximum_price: float | None,
     auto_buy_enabled: bool
 ):
-
     cart_response = (
         supabase
         .table("smart_carts")
@@ -50,6 +51,12 @@ def add_item_to_smart_cart(
     if not product_response.data:
         raise ValueError("Product not found")
 
+    purchase_authorized_at = (
+        datetime.now(timezone.utc).isoformat()
+        if auto_buy_enabled
+        else None
+    )
+
     item_response = (
         supabase
         .table("smart_cart_items")
@@ -61,6 +68,7 @@ def add_item_to_smart_cart(
             "quantity": quantity,
             "maximum_price": maximum_price,
             "auto_buy_enabled": auto_buy_enabled,
+            "purchase_authorized_at": purchase_authorized_at,
             "status": "WATCHING"
         })
         .execute()
@@ -70,6 +78,7 @@ def add_item_to_smart_cart(
         raise ValueError("Failed to add item to Smart Cart")
 
     return item_response.data[0]
+
 
 def get_smart_cart(cart_id: int):
     # Get the Smart Cart
@@ -100,8 +109,8 @@ def get_smart_cart(cart_id: int):
         "items": items_response.data
     }
 
-def cancel_smart_cart_item(item_id: int):
 
+def cancel_smart_cart_item(item_id: int):
     # Get the item
     item_response = (
         supabase
