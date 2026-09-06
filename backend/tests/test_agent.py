@@ -1133,3 +1133,69 @@ def test_agent_handles_smart_cart_tool_failure(
 
     assert "execute_purchase" not in tool_names
     assert "validate_purchase" not in tool_names
+
+def test_context_instruction_empty_without_history():
+    result = agent.build_context_instruction(
+        "Is size 9 available?",
+        []
+    )
+
+    assert result == ""
+
+
+def test_context_instruction_for_reference():
+    history = [
+        {
+            "role": "user",
+            "content": "Show me Nike shoes"
+        },
+        {
+            "role": "assistant",
+            "content": "I found the Nike Air Max 270."
+        }
+    ]
+
+    result = agent.build_context_instruction(
+        "Is size 9 available?",
+        history
+    )
+
+    assert "previous conversation" in result.lower()
+    assert "search_products" in result
+    assert "product_id" in result
+    assert "trusted" in result.lower()
+
+
+def test_context_instruction_mentions_reference_resolution():
+    history = [
+        {
+            "role": "user",
+            "content": "Show me Nike Air Max 270"
+        }
+    ]
+
+    result = agent.build_context_instruction(
+        "Is it available?",
+        history
+    )
+
+    assert "it" in result
+    assert "that product" in result
+    assert "same one" in result
+
+
+def test_invalid_conversation_history_entry_is_ignored():
+    history = [
+        "invalid history entry",
+        {
+            "role": "user",
+            "content": "Show me Nike shoes"
+        }
+    ]
+
+    result = agent.build_context_instruction(
+        "Is it available?",
+        history
+    )
+
+    assert result != ""

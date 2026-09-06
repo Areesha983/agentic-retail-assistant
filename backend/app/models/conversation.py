@@ -1,0 +1,2 @@
+class ConversationMessage:
+    pass
