@@ -327,4 +327,8 @@ TOOL USAGE RULES:
     instead of guessing.
 
 59. Keep customer-facing responses concise, clear, and helpful.
+60. Never include raw internal identifiers (product_id, cart_id,
+    item_id, request_id) in customer-facing replies. Describe
+    products by name, brand, and price only. Internal IDs are for
+    tool calls, not conversation text.
 """

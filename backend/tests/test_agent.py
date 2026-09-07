@@ -502,257 +502,20 @@ def test_agent_orchestrates_smart_cart_auto_buy(monkeypatch):
     assert "Rs. 20,000" in result["reply"]
 
 
-def test_agent_blocks_unverified_cart_id(monkeypatch):
-    responses = iter([
-        make_response(
-            tool_calls=[
-                make_tool_call(
-                    "search_products",
-                    {
-                        "query": "Nike Air Max 270"
-                    }
-                )
-            ]
-        ),
-        make_response(
-            tool_calls=[
-                make_tool_call(
-                    "add_to_smart_cart",
-                    {
-                        "cart_id": 9999,
-                        "product_id": 1,
-                        "variant": "Size 9",
-                        "color": "Black",
-                        "quantity": 1,
-                        "maximum_price": 20000,
-                        "auto_buy_enabled": True
-                    }
-                )
-            ]
-        ),
-        make_response(
-            content=(
-                "I need a verified Smart Cart before "
-                "I can add the product."
-            )
-        )
-    ])
-
+def test_agent_verifies_cart_before_adding(monkeypatch):
     monkeypatch.setattr(
         agent,
-        "chat",
-        lambda **kwargs: next(responses)
+        "resolve_smart_cart_product",
+        lambda user_message, conversation_history: {
+            "success": True,
+            "query": "Nike Air Max 270"
+        }
     )
 
     execute_calls = []
 
     def fake_execute_tool(tool_name, **kwargs):
-        execute_calls.append(
-            (tool_name, kwargs)
-        )
-
-        if tool_name == "search_products":
-            return {
-                "success": True,
-                "count": 1,
-                "products": [
-                    {
-                        "product_id": 1,
-                        "name": "Air Max 270",
-                        "brand": "Nike"
-                    }
-                ]
-            }
-
-        raise AssertionError(
-            "Unverified cart should never reach execute_tool"
-        )
-
-    monkeypatch.setattr(
-        agent,
-        "execute_tool",
-        fake_execute_tool
-    )
-
-    result = agent.run_agent(
-        "Add Nike Air Max 270 to Smart Cart",
-        user_id=1001
-    )
-
-    assert execute_calls[0][0] == "search_products"
-
-    assert all(
-        kwargs.get("cart_id") != 9999
-        for _, kwargs in execute_calls
-    )
-
-    assert result["success"] is True
-
-    assert result["tool_history"][-1]["tool"] == (
-        "add_to_smart_cart"
-    )
-
-    assert result["tool_history"][-1]["result"]["success"] is False
-
-    assert "Unverified cart_id" in (
-        result["tool_history"][-1]["result"]["error"]
-    )
-
-
-def test_agent_blocks_unverified_product_in_smart_cart(
-    monkeypatch
-):
-    responses = iter([
-        make_response(
-            tool_calls=[
-                make_tool_call(
-                    "add_to_smart_cart",
-                    {
-                        "cart_id": 7,
-                        "product_id": 9999,
-                        "variant": "Size 9",
-                        "color": "Black",
-                        "quantity": 1,
-                        "maximum_price": 20000,
-                        "auto_buy_enabled": True
-                    }
-                )
-            ]
-        ),
-        make_response(
-            tool_calls=[
-                make_tool_call(
-                    "search_products",
-                    {
-                        "query": "Nike Air Max 270"
-                    }
-                )
-            ]
-        ),
-        make_response(
-            content=(
-                "I found the product, but I need a "
-                "verified Smart Cart before adding it."
-            )
-        )
-    ])
-
-    monkeypatch.setattr(
-        agent,
-        "chat",
-        lambda **kwargs: next(responses)
-    )
-
-    execute_calls = []
-
-    def fake_execute_tool(tool_name, **kwargs):
-        execute_calls.append(
-            (tool_name, kwargs)
-        )
-
-        if tool_name == "search_products":
-            return {
-                "success": True,
-                "count": 1,
-                "products": [
-                    {
-                        "product_id": 1,
-                        "name": "Air Max 270",
-                        "brand": "Nike"
-                    }
-                ]
-            }
-
-        raise AssertionError(
-            f"Unexpected tool execution: {tool_name}"
-        )
-
-    monkeypatch.setattr(
-        agent,
-        "execute_tool",
-        fake_execute_tool
-    )
-
-    result = agent.run_agent(
-        "Add Nike Air Max 270 to my Smart Cart",
-        user_id=1001
-    )
-
-    assert execute_calls[0][0] == "search_products"
-
-    assert all(
-        kwargs.get("product_id") != 9999
-        for _, kwargs in execute_calls
-    )
-
-    assert result["tool_history"][0]["tool"] == (
-        "add_to_smart_cart"
-    )
-
-    assert result["tool_history"][0]["result"]["success"] is False
-
-    assert "Unverified product_id" in (
-        result["tool_history"][0]["result"]["error"]
-    )
-
-
-def test_agent_does_not_enable_auto_buy_without_price(
-    monkeypatch
-):
-    responses = iter([
-        make_response(
-            tool_calls=[
-                make_tool_call(
-                    "search_products",
-                    {
-                        "query": "Nike Air Max 270"
-                    }
-                )
-            ]
-        ),
-        make_response(
-            tool_calls=[
-                make_tool_call(
-                    "create_smart_cart",
-                    {}
-                )
-            ]
-        ),
-        make_response(
-            tool_calls=[
-                make_tool_call(
-                    "add_to_smart_cart",
-                    {
-                        "cart_id": 7,
-                        "product_id": 1,
-                        "variant": "Size 9",
-                        "color": "Black",
-                        "quantity": 1,
-                        "auto_buy_enabled": True
-                    }
-                )
-            ]
-        ),
-        make_response(
-            content=(
-                "Please provide a maximum price "
-                "before enabling auto-buy."
-            )
-        )
-    ])
-
-    monkeypatch.setattr(
-        agent,
-        "chat",
-        lambda **kwargs: next(responses)
-    )
-
-    execute_calls = []
-
-    def fake_execute_tool(tool_name, **kwargs):
-        execute_calls.append(
-            (tool_name, kwargs)
-        )
+        execute_calls.append((tool_name, kwargs))
 
         if tool_name == "search_products":
             return {
@@ -768,8 +531,6 @@ def test_agent_does_not_enable_auto_buy_without_price(
             }
 
         if tool_name == "create_smart_cart":
-            assert kwargs["user_id"] == 1001
-
             return {
                 "success": True,
                 "cart": {
@@ -779,9 +540,144 @@ def test_agent_does_not_enable_auto_buy_without_price(
                 }
             }
 
+        if tool_name == "add_to_smart_cart":
+            assert kwargs["cart_id"] == 7
+            assert kwargs["cart_id"] != 9999
+            assert kwargs["product_id"] == 1
+
+            return {
+                "success": True,
+                "item": {
+                    "item_id": 15,
+                    "cart_id": 7,
+                    "product_id": 1,
+                    "status": "WATCHING"
+                }
+            }
+
         raise AssertionError(
-            "add_to_smart_cart must not execute "
-            "without a maximum price"
+            f"Unexpected tool: {tool_name}"
+        )
+
+    monkeypatch.setattr(
+        agent,
+        "execute_tool",
+        fake_execute_tool
+    )
+
+    result = agent.run_agent(
+        "Add Nike Air Max 270 to Smart Cart",
+        user_id=1001
+    )
+
+    tool_names = [
+        item["tool"]
+        for item in result["tool_history"]
+    ]
+
+    assert tool_names == [
+        "search_products",
+        "create_smart_cart",
+        "add_to_smart_cart"
+    ]
+
+    assert execute_calls[1][1]["user_id"] == 1001
+    assert execute_calls[2][1]["cart_id"] == 7 
+
+    assert result["success"] is True
+
+
+def test_agent_uses_verified_product_id_in_smart_cart(
+    monkeypatch
+):
+    monkeypatch.setattr(
+        agent,
+        "resolve_smart_cart_product",
+        lambda user_message, conversation_history: {
+            "success": True,
+            "query": "Nike Air Max 270"
+        }
+    )
+
+    execute_calls = []
+
+    def fake_execute_tool(tool_name, **kwargs):
+        execute_calls.append((tool_name, kwargs))
+
+        if tool_name == "search_products":
+            return {
+                "success": True,
+                "count": 1,
+                "products": [
+                    {
+                        "product_id": 1,
+                        "name": "Air Max 270",
+                        "brand": "Nike"
+                    }
+                ]
+            }
+
+        if tool_name == "create_smart_cart":
+            return {
+                "success": True,
+                "cart": {
+                    "cart_id": 7,
+                    "user_id": 1001,
+                    "status": "ACTIVE"
+                }
+            }
+
+        if tool_name == "add_to_smart_cart":
+            assert kwargs["product_id"] == 1
+            assert kwargs["product_id"] != 9999
+
+            return {
+                "success": True,
+                "item": {
+                    "item_id": 15,
+                    "cart_id": 7,
+                    "product_id": 1,
+                    "status": "WATCHING"
+                }
+            }
+
+        raise AssertionError(
+            f"Unexpected tool: {tool_name}"
+        )
+
+    monkeypatch.setattr(
+        agent,
+        "execute_tool",
+        fake_execute_tool
+    )
+
+    result = agent.run_agent(
+        "Add Nike Air Max 270 to my Smart Cart",
+        user_id=1001
+    )
+
+    assert execute_calls[0][0] == "search_products"
+    assert execute_calls[1][0] == "create_smart_cart"
+    assert execute_calls[2][0] == "add_to_smart_cart"
+
+    assert execute_calls[2][1]["product_id"] == 1
+    assert execute_calls[2][1]["product_id"] != 9999
+
+    assert result["success"] is True
+
+def test_agent_does_not_enable_auto_buy_without_price(
+    monkeypatch
+):
+    execute_calls = []
+
+    def fake_execute_tool(tool_name, **kwargs):
+        execute_calls.append(
+            (tool_name, kwargs)
+        )
+
+        raise AssertionError(
+            "No tool should execute when auto-buy "
+            "is requested without a maximum price."
         )
 
     monkeypatch.setattr(
@@ -798,25 +694,14 @@ def test_agent_does_not_enable_auto_buy_without_price(
         user_id=1001
     )
 
-    assert execute_calls[0][0] == "search_products"
-    assert execute_calls[1][0] == "create_smart_cart"
-
-    assert all(
-        tool_name != "add_to_smart_cart"
-        for tool_name, _ in execute_calls
-    )
-
     assert result["success"] is True
 
-    rejected = result["tool_history"][-1]
-
-    assert rejected["tool"] == "add_to_smart_cart"
-    assert rejected["result"]["success"] is False
-
-    assert "maximum_price" in (
-        rejected["result"]["error"]
+    assert "maximum price" in (
+        result["reply"].lower()
     )
 
+    assert execute_calls == []
+    assert result["tool_history"] == []
 
 def test_agent_requires_explicit_auto_buy_authorization(
     monkeypatch
@@ -1015,53 +900,13 @@ def test_agent_never_executes_purchase_directly(
 def test_agent_handles_smart_cart_tool_failure(
     monkeypatch
 ):
-    responses = iter([
-        make_response(
-            tool_calls=[
-                make_tool_call(
-                    "search_products",
-                    {
-                        "query": "Nike Air Max 270"
-                    }
-                )
-            ]
-        ),
-        make_response(
-            tool_calls=[
-                make_tool_call(
-                    "create_smart_cart",
-                    {}
-                )
-            ]
-        ),
-        make_response(
-            tool_calls=[
-                make_tool_call(
-                    "add_to_smart_cart",
-                    {
-                        "cart_id": 7,
-                        "product_id": 1,
-                        "variant": "Size 9",
-                        "color": "Black",
-                        "quantity": 1,
-                        "maximum_price": 20000,
-                        "auto_buy_enabled": True
-                    }
-                )
-            ]
-        ),
-        make_response(
-            content=(
-                "I couldn't add the item to your "
-                "Smart Cart because the operation failed."
-            )
-        )
-    ])
-
     monkeypatch.setattr(
         agent,
-        "chat",
-        lambda **kwargs: next(responses)
+        "resolve_smart_cart_product",
+        lambda user_message, conversation_history: {
+            "success": True,
+            "query": "Nike Air Max 270"
+        }
     )
 
     def fake_execute_tool(tool_name, **kwargs):
@@ -1116,7 +961,7 @@ def test_agent_handles_smart_cart_tool_failure(
         user_id=1001
     )
 
-    assert result["success"] is True
+    assert result["success"] is False
 
     assert result["tool_history"][-1]["tool"] == (
         "add_to_smart_cart"
@@ -1124,11 +969,20 @@ def test_agent_handles_smart_cart_tool_failure(
 
     assert result["tool_history"][-1]["result"]["success"] is False
 
-    assert "operation failed" in result["reply"].lower()
+    assert (
+        "couldn't add"
+        in result["reply"].lower()
+    )
 
     tool_names = [
         item["tool"]
         for item in result["tool_history"]
+    ]
+
+    assert tool_names == [
+        "search_products",
+        "create_smart_cart",
+        "add_to_smart_cart"
     ]
 
     assert "execute_purchase" not in tool_names

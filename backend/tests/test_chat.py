@@ -484,7 +484,46 @@ def test_chat_context_across_messages(monkeypatch):
         ),
 
         # -------------------------------------------------
-        # Second message -> final answer using context
+        # Second message -> "What is its price?" now requires
+        # verification (widened is_product_search_request).
+        # known_product_ids resets per run, so the product must
+        # be re-resolved via search_products even though it was
+        # already mentioned in conversation_history.
+        # -------------------------------------------------
+
+        FakeResponse(
+            content="",
+            tool_calls=[
+                FakeToolCall(
+                    "search_products",
+                    {
+                        "query": "Nike Air Max 270"
+                    }
+                )
+            ]
+        ),
+
+        # -------------------------------------------------
+        # Second message -> fetch a FRESH price using the
+        # newly-verified product_id, rather than reusing the
+        # price mentioned in the earlier assistant reply.
+        # -------------------------------------------------
+
+        FakeResponse(
+            content="",
+            tool_calls=[
+                FakeToolCall(
+                    "get_product_details",
+                    {
+                        "product_id": 1
+                    }
+                )
+            ]
+        ),
+
+        # -------------------------------------------------
+        # Second message -> final answer, grounded in the
+        # get_product_details result above.
         # -------------------------------------------------
 
         FakeResponse(
@@ -562,6 +601,32 @@ def test_chat_context_across_messages(monkeypatch):
 
     assert "19,000" in second["reply"]
 
+    # -----------------------------------------------------
+    # Verify the price answer was grounded in fresh tool
+    # calls, not reused from stale conversation text.
+    # -----------------------------------------------------
+
+    tool_names = [
+        entry["tool"]
+        for entry in second["tool_history"]
+    ]
+
+    assert "search_products" in tool_names
+
+    assert "get_product_details" in tool_names
+
+    detail_calls = [
+        entry
+        for entry in second["tool_history"]
+        if entry["tool"] == "get_product_details"
+    ]
+
+    assert len(detail_calls) == 1
+
+    assert (
+        detail_calls[0]["arguments"]["product_id"]
+        == 1
+    )
 
 # =========================================================
 # Previous product context
