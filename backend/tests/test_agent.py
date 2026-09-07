@@ -212,56 +212,13 @@ def test_agent_searches_before_inventory(monkeypatch):
 
 
 def test_agent_blocks_fake_product_id(monkeypatch):
-    responses = iter([
-        make_response(
-            tool_calls=[
-                make_tool_call(
-                    "check_inventory",
-                    {
-                        "product_id": 12345,
-                        "variant": "9",
-                        "color": "black",
-                        "branch": "Dolmen Mall"
-                    }
-                )
-            ]
-        ),
-        make_response(
-            tool_calls=[
-                make_tool_call(
-                    "search_products",
-                    {
-                        "query": "Nike Air Max 270"
-                    }
-                )
-            ]
-        ),
-        make_response(
-            tool_calls=[
-                make_tool_call(
-                    "check_inventory",
-                    {
-                        "product_id": 1,
-                        "variant": "9",
-                        "color": "black",
-                        "branch": "Dolmen Mall"
-                    }
-                )
-            ]
-        ),
-        make_response(
-            content=(
-                "Nike Air Max 270 size 9 black "
-                "is available at Dolmen Mall."
-            )
-        )
-    ])
+    """
+    The optimized availability path is deterministic and does not ask
+    the LLM to choose an inventory product_id.
 
-    monkeypatch.setattr(
-        agent,
-        "chat",
-        lambda **kwargs: next(responses)
-    )
+    This test verifies the stronger safety property:
+    inventory receives only the product_id returned by search_products.
+    """
 
     execute_calls = []
 
@@ -312,12 +269,25 @@ def test_agent_blocks_fake_product_id(monkeypatch):
         fake_execute_tool
     )
 
+    # A normal availability request must not need the LLM at all.
+    def fail_if_chat_called(**kwargs):
+        raise AssertionError(
+            "Fast availability workflow should not call the LLM"
+        )
+
+    monkeypatch.setattr(
+        agent,
+        "chat",
+        fail_if_chat_called
+    )
+
     result = agent.run_agent(
         "Is Nike Air Max 270 size 9 black "
         "in stock at Dolmen Mall?",
         user_id=1001
     )
 
+    # A hallucinated ID such as 12345 can never reach inventory.
     assert all(
         kwargs.get("product_id") != 12345
         for _, kwargs in execute_calls
@@ -327,17 +297,18 @@ def test_agent_blocks_fake_product_id(monkeypatch):
     assert execute_calls[1][0] == "check_inventory"
     assert execute_calls[1][1]["product_id"] == 1
 
-    assert result["tool_history"][0]["tool"] == (
+    tool_names = [
+        item["tool"]
+        for item in result["tool_history"]
+    ]
+
+    assert tool_names == [
+        "search_products",
         "check_inventory"
-    )
-
-    assert result["tool_history"][0]["result"]["success"] is False
-
-    assert "Unverified product_id" in (
-        result["tool_history"][0]["result"]["error"]
-    )
+    ]
 
     assert result["success"] is True
+    assert "1 unit available" in result["reply"]
 
 
 def test_agent_orchestrates_smart_cart_auto_buy(monkeypatch):

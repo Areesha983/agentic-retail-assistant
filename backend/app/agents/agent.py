@@ -892,19 +892,30 @@ def resolve_product_query_from_context(
     user_message: str
 ) -> str:
     """
-    Deterministically resolve a product reference from recent
+    Resolve a product search query from the current request or recent
     conversation context.
 
-    This function returns only a product search query.
-    It NEVER returns or trusts a product_id.
+    Security rule:
+    - Product IDs from conversation text are never trusted.
+    - User-authored history is preferred over assistant-authored history.
+    - The returned value is search text only.
     """
 
     current_text = user_message.strip()
 
+    generic_references = {
+        "it",
+        "that",
+        "this",
+        "the product",
+        "the item",
+        "same one",
+    }
+
     # ---------------------------------------------------------
-    # If the current message explicitly contains a product name,
-    # try to extract it first.
+    # 1. Product names explicitly present in the current request
     # ---------------------------------------------------------
+
     explicit_patterns = [
         r"\badd\s+(.+?)\s+to\s+(?:my\s+)?smart\s+cart\b",
         r"\badd\s+(.+?)\s+to\s+(?:my\s+)?cart\b",
@@ -922,24 +933,35 @@ def resolve_product_query_from_context(
         if match:
             candidate = match.group(1).strip()
 
-            if candidate.lower() not in {
-                "it",
-                "that",
-                "this",
-                "the product",
-                "the item",
-                "same one",
-            }:
+            if candidate.lower() not in generic_references:
                 return candidate
 
     # ---------------------------------------------------------
-    # Search conversation from newest to oldest.
+    # 2. Prefer USER history over assistant history.
+    #
+    # This avoids grounding future searches in wording invented by
+    # the assistant when a customer-authored product name exists.
     # ---------------------------------------------------------
-    for message in reversed(conversation_history or []):
 
-        if not isinstance(message, dict):
-            continue
+    history = conversation_history or []
 
+    ordered_history = [
+        message
+        for message in reversed(history)
+        if (
+            isinstance(message, dict)
+            and message.get("role") == "user"
+        )
+    ] + [
+        message
+        for message in reversed(history)
+        if (
+            isinstance(message, dict)
+            and message.get("role") == "assistant"
+        )
+    ]
+
+    for message in ordered_history:
         content = message.get("content")
 
         if not isinstance(content, str):
@@ -951,44 +973,48 @@ def resolve_product_query_from_context(
             continue
 
         # -----------------------------------------------------
-        # 1. Product name inside quotes.
-        #
-        # Example:
-        # The product "Nike Air Max 270" has been found...
+        # Product names inside quotes
         # -----------------------------------------------------
+
         quoted_patterns = [
             r'"([^"]+)"',
             r"'([^']+)'",
         ]
 
         for pattern in quoted_patterns:
-            matches = re.findall(
-                pattern,
-                content
-            )
-
-            for candidate in matches:
+            for candidate in re.findall(pattern, content):
                 candidate = candidate.strip()
 
-                if (
-                    candidate
-                    and candidate not in _NON_PRODUCT_PHRASES
-                    and not candidate.lower().startswith(
-                        ("product id", "rs.", "pkr")
-                    )
+                if not candidate:
+                    continue
+
+                if candidate in _NON_PRODUCT_PHRASES:
+                    continue
+
+                if candidate.lower().startswith(
+                    ("product id", "rs.", "pkr")
                 ):
-                    # Avoid returning generic conversational text.
-                    if len(candidate.split()) <= 6:
-                        return candidate
+                    continue
+
+                if len(candidate.split()) <= 6:
+                    return candidate
 
         # -----------------------------------------------------
-        # 2. Common product-introduction phrases.
+        # Common product-introduction / request phrases
         # -----------------------------------------------------
+
         phrase_patterns = [
-            r"the product\s+([A-Z][A-Za-z0-9']*(?:\s+[A-Za-z0-9']+){0,5})",
-            r"product:\s*([A-Z][A-Za-z0-9']*(?:\s+[A-Za-z0-9']+){0,5})",
+            r"tell me about\s+(.+?)(?:\?|$)",
+            r"show me\s+(.+?)(?:\?|$)",
+            r"find(?: me)?\s+(.+?)(?:\?|$)",
             r"do you have\s+(.+?)(?:\?|$)",
             r"looking for\s+(.+?)(?:\?|$)",
+            r"the product\s+"
+            r"([A-Z][A-Za-z0-9']*"
+            r"(?:\s+[A-Za-z0-9']+){0,5})",
+            r"product:\s*"
+            r"([A-Z][A-Za-z0-9']*"
+            r"(?:\s+[A-Za-z0-9']+){0,5})",
         ]
 
         for pattern in phrase_patterns:
@@ -998,38 +1024,45 @@ def resolve_product_query_from_context(
                 flags=re.IGNORECASE
             )
 
-            if match:
-                candidate = match.group(1).strip()
+            if not match:
+                continue
 
-                # Remove common trailing conversational text.
-                candidate = re.split(
-                    r"\s+(?:has been|is available|currently costs|costs|for)\b",
-                    candidate,
-                    maxsplit=1,
-                    flags=re.IGNORECASE
-                )[0].strip()
+            candidate = match.group(1).strip()
 
-                if (
-                    candidate
-                    and candidate.lower() not in {
-                        "it",
-                        "that",
-                        "this",
-                        "the product",
-                        "the item",
-                        "same one",
-                    }
-                ):
-                    return candidate
+            candidate = re.split(
+                r"\s+(?:"
+                r"has been|"
+                r"is available|"
+                r"currently costs|"
+                r"costs|"
+                r"for"
+                r")\b",
+                candidate,
+                maxsplit=1,
+                flags=re.IGNORECASE
+            )[0].strip()
+
+            if candidate.lower() in generic_references:
+                continue
+
+            if candidate:
+                return candidate
 
         # -----------------------------------------------------
-        # 3. Product-like capitalized phrase.
+        # Capitalized product-like phrase fallback.
+        #
+        # Digits are allowed at the beginning of later tokens so
+        # "Nike Air Max 270" is kept intact.
         # -----------------------------------------------------
-        pattern = re.compile(
-            r"\b([A-Z][A-Za-z0-9']*(?:\s+[A-Z][A-Za-z0-9']*){1,5})\b"
+
+        capitalized_pattern = re.compile(
+            r"\b("
+            r"[A-Z][A-Za-z0-9']*"
+            r"(?:\s+[A-Z0-9][A-Za-z0-9']*){1,5}"
+            r")\b"
         )
 
-        for match in pattern.finditer(content):
+        for match in capitalized_pattern.finditer(content):
             candidate = match.group(1).strip()
 
             if candidate in _NON_PRODUCT_PHRASES:
@@ -1047,9 +1080,13 @@ def resolve_product_query_from_context(
             return candidate
 
     # ---------------------------------------------------------
-    # Nothing reliable found.
+    # 3. Safe fallback.
+    #
+    # The product service already supports natural-language search,
+    # so the full current message can be used as search text.
     # ---------------------------------------------------------
-    return user_message
+
+    return current_text
 
 def has_variant_or_color_reference(message: str) -> bool:
     """
@@ -1073,6 +1110,43 @@ def has_variant_or_color_reference(message: str) -> bool:
     ]
 
     return any(color in text for color in colors)
+
+
+def extract_branch_reference(
+    user_message: str,
+    conversation_history: list | None = None
+) -> str | None:
+    """
+    Extract a known branch reference from the current message or
+    recent conversation context.
+
+    The current MVP inventory seed uses these branch names.
+    """
+
+    known_branches = [
+        "Dolmen Mall",
+        "Lucky One Mall",
+    ]
+
+    messages = [user_message]
+
+    for history_item in reversed(conversation_history or []):
+        if not isinstance(history_item, dict):
+            continue
+
+        content = history_item.get("content")
+
+        if isinstance(content, str):
+            messages.append(content)
+
+    for message in messages:
+        lowered = message.lower()
+
+        for branch in known_branches:
+            if branch.lower() in lowered:
+                return branch
+
+    return None
 
 def resolve_smart_cart_product(
     user_message: str,
@@ -1164,7 +1238,8 @@ def resolve_smart_cart_product(
                 if tool["function"]["name"] == "search_products"
             )
         ],
-        think=False
+        think=False,
+        keep_alive="30m"
     )
 
     tool_calls = response.message.tool_calls or []
@@ -1654,6 +1729,237 @@ def run_support_escalation_workflow(
             }
         ]
     }    
+
+
+def run_availability_workflow(
+    user_message: str,
+    conversation_history: list | None = None
+) -> dict:
+    """
+    Fast deterministic product-availability workflow.
+
+    This intentionally avoids repeated local-LLM generations for a
+    common retail operation:
+
+        resolve product text
+        -> search_products
+        -> verified product_id
+        -> check_inventory
+        -> deterministic customer response
+
+    The inventory tool only receives a product_id returned by the
+    backend product-search tool.
+    """
+
+    if conversation_history is None:
+        conversation_history = []
+
+    arguments = extract_contextual_smart_cart_arguments(
+        user_message=user_message,
+        conversation_history=conversation_history
+    )
+
+    variant = arguments.get("variant")
+    color = arguments.get("color")
+
+    branch = extract_branch_reference(
+        user_message=user_message,
+        conversation_history=conversation_history
+    )
+
+    product_query = resolve_product_query_from_context(
+        conversation_history=conversation_history,
+        user_message=user_message
+    )
+
+    tool_history = []
+
+    # ---------------------------------------------------------
+    # 1. Search the catalog
+    # ---------------------------------------------------------
+
+    search_result = execute_tool(
+        "search_products",
+        query=product_query
+    )
+
+    tool_history.append({
+        "tool": "search_products",
+        "arguments": {
+            "query": product_query
+        },
+        "result": search_result
+    })
+
+    if search_result.get("success") is not True:
+        return {
+            "success": False,
+            "reply": "I couldn't verify that product in the catalog.",
+            "tool_history": tool_history
+        }
+
+    products = search_result.get("products", [])
+
+    if not products:
+        return {
+            "success": True,
+            "reply": (
+                "I couldn't find a matching product "
+                "in the catalog."
+            ),
+            "tool_history": tool_history
+        }
+
+    if len(products) > 1:
+        product_names = []
+
+        for product in products:
+            brand = product.get("brand")
+            name = product.get("name", "Unknown product")
+
+            display_name = (
+                f"{brand} {name}"
+                if (
+                    brand
+                    and brand.lower() not in name.lower()
+                )
+                else name
+            )
+
+            product_names.append(display_name)
+
+        return {
+            "success": True,
+            "reply": (
+                "I found multiple matching products: "
+                + ", ".join(product_names)
+                + ". Which one do you mean?"
+            ),
+            "tool_history": tool_history
+        }
+
+    # ---------------------------------------------------------
+    # 2. Trust only the backend-returned product ID
+    # ---------------------------------------------------------
+
+    product = products[0]
+    product_id = product.get("product_id")
+
+    if type(product_id) is not int:
+        raise RuntimeError(
+            "Product search returned an invalid product ID"
+        )
+
+    # ---------------------------------------------------------
+    # 3. Check inventory
+    # ---------------------------------------------------------
+
+    inventory_result = execute_tool(
+        "check_inventory",
+        product_id=product_id,
+        variant=variant,
+        color=color,
+        branch=branch
+    )
+
+    tool_history.append({
+        "tool": "check_inventory",
+        "arguments": {
+            "product_id": product_id,
+            "variant": variant,
+            "color": color,
+            "branch": branch
+        },
+        "result": inventory_result
+    })
+
+    if inventory_result.get("success") is not True:
+        return {
+            "success": False,
+            "reply": "I couldn't verify the current inventory.",
+            "tool_history": tool_history
+        }
+
+    inventory_rows = inventory_result.get("inventory", [])
+
+    total_quantity = inventory_result.get(
+        "total_quantity",
+        0
+    )
+
+    try:
+        total_quantity = int(total_quantity)
+    except (TypeError, ValueError):
+        total_quantity = 0
+
+    # ---------------------------------------------------------
+    # 4. Customer-friendly description
+    # ---------------------------------------------------------
+
+    brand = product.get("brand")
+    product_name = product.get("name", "The product")
+
+    if (
+        brand
+        and brand.lower() not in product_name.lower()
+    ):
+        display_name = f"{brand} {product_name}"
+    else:
+        display_name = product_name
+
+    description_parts = [display_name]
+
+    if variant:
+        description_parts.append(variant)
+
+    if color:
+        description_parts.append(color)
+
+    description = " ".join(description_parts)
+
+    # ---------------------------------------------------------
+    # 5. Deterministic final response
+    # ---------------------------------------------------------
+
+    if not inventory_rows or total_quantity <= 0:
+        reply = (
+            f"{description} is currently out of stock."
+        )
+
+    else:
+        branches = [
+            row.get("branch")
+            for row in inventory_rows
+            if row.get("branch")
+        ]
+
+        unique_branches = list(
+            dict.fromkeys(branches)
+        )
+
+        branch_text = (
+            ", ".join(unique_branches)
+            if unique_branches
+            else "the available branch"
+        )
+
+        if total_quantity == 1:
+            reply = (
+                f"{description} has 1 unit available "
+                f"at {branch_text}."
+            )
+        else:
+            reply = (
+                f"{description} has "
+                f"{total_quantity} units available "
+                f"at {branch_text}."
+            )
+
+    return {
+        "success": True,
+        "reply": reply,
+        "tool_history": tool_history
+    }
 # -------------------------------------------------------------
 # AGENT
 # -------------------------------------------------------------
@@ -1815,22 +2121,22 @@ def run_agent(
     )
 
     human_escalation_required = (
-    is_human_escalation_request(
-        user_message
+        is_human_escalation_request(
+            user_message
+        )
     )
-)
-
 
     # ---------------------------------------------------------
-# CONTROLLED HUMAN SUPPORT ESCALATION
-# ---------------------------------------------------------
+    # CONTROLLED HUMAN SUPPORT ESCALATION
+    # ---------------------------------------------------------
 
     if human_escalation_required:
-     return run_support_escalation_workflow(
-        user_message=user_message,
-        user_id=user_id
-    )
-     # ---------------------------------------------------------
+        return run_support_escalation_workflow(
+            user_message=user_message,
+            user_id=user_id
+        )
+
+    # ---------------------------------------------------------
     # CONTROLLED SMART CART WORKFLOW
     # ---------------------------------------------------------
 
@@ -1838,6 +2144,16 @@ def run_agent(
         return run_smart_cart_workflow(
             user_message=user_message,
             user_id=user_id,
+            conversation_history=conversation_history
+        )
+
+    # ---------------------------------------------------------
+    # FAST DETERMINISTIC AVAILABILITY WORKFLOW
+    # ---------------------------------------------------------
+
+    if availability_required:
+        return run_availability_workflow(
+            user_message=user_message,
             conversation_history=conversation_history
         )
 
@@ -1851,7 +2167,8 @@ def run_agent(
             model=OLLAMA_MODEL,
             messages=messages,
             tools=OLLAMA_TOOLS,
-            think=False
+            think=False,
+            keep_alive="30m"
         )
 
         messages.append(response.message)
