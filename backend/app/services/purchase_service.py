@@ -43,6 +43,15 @@ def validate_purchase(smart_cart_item_id: int):
             "reason": "Automatic purchase is not enabled"
         }
 
+    if not item.get("purchase_authorized_at"):
+         return {
+        "valid": False,
+        "reason": (
+            "Automatic purchase has no recorded "
+            "authorization"
+        )
+    }
+
     # --------------------------------------------------
     # 4. Get current product price
     # --------------------------------------------------
