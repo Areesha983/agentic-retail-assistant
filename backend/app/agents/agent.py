@@ -1440,6 +1440,220 @@ def run_smart_cart_workflow(
         "reply": reply,
         "tool_history": tool_history
     }
+
+
+# -------------------------------------------------------------
+# HUMAN SUPPORT ESCALATION
+# -------------------------------------------------------------
+
+def is_human_escalation_request(message: str) -> bool:
+    """
+    Detect requests that should be routed directly to
+    human/customer support.
+
+    Explicit human-help requests are deterministic so the
+    system does not depend entirely on the LLM choosing the
+    support tool correctly.
+    """
+
+    if not isinstance(message, str):
+        return False
+
+    text = message.lower().strip()
+
+    explicit_phrases = [
+        "speak to a human",
+        "talk to a human",
+        "human agent",
+        "human support",
+        "support agent",
+        "customer support",
+        "customer service",
+        "speak to someone",
+        "talk to someone",
+        "connect me to support",
+        "connect me with support",
+        "connect me to an agent",
+        "connect me with an agent",
+        "need an agent",
+        "want an agent",
+        "need a representative",
+        "speak to a representative",
+        "talk to a representative",
+        "escalate this",
+        "escalate my issue",
+        "escalate my complaint",
+        "speak to a manager",
+        "talk to a manager",
+    ]
+
+    if any(
+        phrase in text
+        for phrase in explicit_phrases
+    ):
+        return True
+
+    # Serious transactional issues that should not be
+    # handled only through conversational generation.
+    charged_issue = (
+        "charged" in text
+        and any(
+            phrase in text
+            for phrase in [
+                "order failed",
+                "order was cancelled",
+                "order cancelled",
+                "no order",
+                "didn't get my order",
+                "did not get my order",
+                "purchase failed",
+            ]
+        )
+    )
+
+    return charged_issue
+
+
+def get_support_escalation_details(
+    message: str
+) -> dict:
+    """
+    Determine a simple deterministic reason and priority
+    for an escalated support request.
+    """
+
+    text = message.lower()
+
+    payment_keywords = [
+        "charged",
+        "payment",
+        "refund",
+        "money",
+        "transaction",
+    ]
+
+    urgent_keywords = [
+        "unauthorized charge",
+        "unauthorised charge",
+        "fraud",
+        "charged without permission",
+    ]
+
+    order_keywords = [
+        "order",
+        "purchase",
+        "delivery",
+        "cancelled",
+        "canceled",
+    ]
+
+    if any(
+        keyword in text
+        for keyword in urgent_keywords
+    ):
+        return {
+            "reason": "PAYMENT_SECURITY",
+            "priority": "URGENT"
+        }
+
+    if any(
+        keyword in text
+        for keyword in payment_keywords
+    ):
+        return {
+            "reason": "PAYMENT_OR_REFUND",
+            "priority": "HIGH"
+        }
+
+    if any(
+        keyword in text
+        for keyword in order_keywords
+    ):
+        return {
+            "reason": "ORDER_ISSUE",
+            "priority": "HIGH"
+        }
+
+    return {
+        "reason": "HUMAN_ESCALATION",
+        "priority": "MEDIUM"
+    }
+
+
+def run_support_escalation_workflow(
+    user_message: str,
+    user_id: int
+) -> dict:
+    """
+    Create a real support request using trusted backend
+    user identity and return a deterministic confirmation.
+    """
+
+    escalation = get_support_escalation_details(
+        user_message
+    )
+
+    result = execute_tool(
+        "create_support_request",
+        user_id=user_id,
+        message=user_message,
+        reason=escalation["reason"],
+        priority=escalation["priority"]
+    )
+
+    if result.get("success") is not True:
+        return {
+            "success": False,
+            "reply": (
+                "I couldn't create the support request. "
+                "Please try again."
+            ),
+            "tool_history": [
+                {
+                    "tool": "create_support_request",
+                    "arguments": {
+                        "user_id": user_id,
+                        "message": user_message,
+                        "reason": escalation["reason"],
+                        "priority": escalation["priority"]
+                    },
+                    "result": result
+                }
+            ]
+        }
+
+    request = result.get("request", {})
+
+    request_id = request.get("request_id")
+
+    if request_id is not None:
+        reply = (
+            "I've created a human support request for you. "
+            f"Your support request number is {request_id}."
+        )
+    else:
+        reply = (
+            "I've created a human support request for you."
+        )
+
+    return {
+        "success": True,
+        "reply": reply,
+        "tool_history": [
+            {
+                "tool": "create_support_request",
+                "arguments": {
+                    # Keep user_id in internal tool history,
+                    # but never let the LLM invent it.
+                    "user_id": user_id,
+                    "message": user_message,
+                    "reason": escalation["reason"],
+                    "priority": escalation["priority"]
+                },
+                "result": result
+            }
+        ]
+    }    
 # -------------------------------------------------------------
 # AGENT
 # -------------------------------------------------------------
@@ -1598,6 +1812,23 @@ def run_agent(
         is_smart_cart_action(
             user_message
         )
+    )
+
+    human_escalation_required = (
+    is_human_escalation_request(
+        user_message
+    )
+)
+
+
+    # ---------------------------------------------------------
+# CONTROLLED HUMAN SUPPORT ESCALATION
+# ---------------------------------------------------------
+
+    if human_escalation_required:
+     return run_support_escalation_workflow(
+        user_message=user_message,
+        user_id=user_id
     )
      # ---------------------------------------------------------
     # CONTROLLED SMART CART WORKFLOW

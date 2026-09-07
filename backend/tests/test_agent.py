@@ -1053,3 +1053,154 @@ def test_invalid_conversation_history_entry_is_ignored():
     )
 
     assert result != ""
+
+def test_detects_explicit_human_escalation():
+    from app.agents.agent import (
+        is_human_escalation_request
+    )
+
+    assert (
+        is_human_escalation_request(
+            "I want to speak to a human"
+        )
+        is True
+    )
+
+    assert (
+        is_human_escalation_request(
+            "Please connect me to customer support"
+        )
+        is True
+    )
+
+
+def test_normal_product_request_is_not_escalation():
+    from app.agents.agent import (
+        is_human_escalation_request
+    )
+
+    assert (
+        is_human_escalation_request(
+            "Do you have Nike Air Max 270?"
+        )
+        is False
+    )
+
+
+def test_charged_failed_order_is_escalated():
+    from app.agents.agent import (
+        is_human_escalation_request
+    )
+
+    assert (
+        is_human_escalation_request(
+            "I was charged but my order failed"
+        )
+        is True
+    )
+
+
+def test_human_escalation_creates_support_request(
+    monkeypatch
+):
+    from app.agents import agent
+
+    captured = {}
+
+    def fake_execute_tool(
+        tool_name,
+        **kwargs
+    ):
+        captured["tool_name"] = tool_name
+        captured["kwargs"] = kwargs
+
+        return {
+            "success": True,
+            "request": {
+                "request_id": 55,
+                "user_id": 1001,
+                "message": kwargs["message"],
+                "reason": kwargs["reason"],
+                "priority": kwargs["priority"],
+                "status": "OPEN"
+            }
+        }
+
+    monkeypatch.setattr(
+        agent,
+        "execute_tool",
+        fake_execute_tool
+    )
+
+    result = agent.run_agent(
+        user_message=(
+            "I want to speak to a human about my order"
+        ),
+        user_id=1001,
+        conversation_history=[]
+    )
+
+    assert result["success"] is True
+
+    assert (
+        captured["tool_name"]
+        == "create_support_request"
+    )
+
+    # Trusted backend identity must be used.
+    assert captured["kwargs"]["user_id"] == 1001
+
+    assert captured["kwargs"]["priority"] == "HIGH"
+
+    assert (
+        captured["kwargs"]["reason"]
+        == "ORDER_ISSUE"
+    )
+
+    assert "55" in result["reply"]
+
+
+def test_payment_issue_gets_high_priority(
+    monkeypatch
+):
+    from app.agents import agent
+
+    captured = {}
+
+    def fake_execute_tool(
+        tool_name,
+        **kwargs
+    ):
+        captured.update(kwargs)
+
+        return {
+            "success": True,
+            "request": {
+                "request_id": 56,
+                "user_id": kwargs["user_id"],
+                "status": "OPEN"
+            }
+        }
+
+    monkeypatch.setattr(
+        agent,
+        "execute_tool",
+        fake_execute_tool
+    )
+
+    result = agent.run_agent(
+        user_message=(
+            "I was charged but my order failed"
+        ),
+        user_id=1001,
+        conversation_history=[]
+    )
+
+    assert result["success"] is True
+
+    assert captured["priority"] == "HIGH"
+
+    assert (
+        captured["reason"]
+        == "PAYMENT_OR_REFUND"
+    )    
