@@ -9,7 +9,8 @@ from app.services.smart_cart_service import (
     create_smart_cart,
     add_item_to_smart_cart,
     get_smart_cart,
-    cancel_smart_cart_item
+    cancel_smart_cart_item,
+    get_smart_carts_by_user
 )
 
 
@@ -115,3 +116,32 @@ def cancel_item(item_id: int):
             status_code=500,
             detail=str(e)
         )
+
+@router.get("/user/{user_id}")
+def get_user_smart_carts(user_id: int):
+    """
+    Get all Smart Carts belonging to a customer.
+    """
+
+    try:
+        carts = get_smart_carts_by_user(
+            user_id
+        )
+
+        return {
+            "success": True,
+            "count": len(carts),
+            "carts": carts
+        }
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e)
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )    

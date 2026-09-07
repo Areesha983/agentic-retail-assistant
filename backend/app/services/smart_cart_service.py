@@ -149,3 +149,45 @@ def cancel_smart_cart_item(item_id: int):
         )
 
     return update_response.data[0]
+
+
+def get_smart_carts_by_user(user_id: int):
+    """
+    Return all Smart Carts belonging to a customer,
+    including the items stored inside each cart.
+    """
+
+    if type(user_id) is not int or user_id <= 0:
+        raise ValueError(
+            "User ID must be a positive integer"
+        )
+
+    carts_response = (
+        supabase
+        .table("smart_carts")
+        .select("*")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+
+    carts = carts_response.data or []
+
+    result = []
+
+    for cart in carts:
+        items_response = (
+            supabase
+            .table("smart_cart_items")
+            .select("*")
+            .eq("cart_id", cart["cart_id"])
+            .order("created_at", desc=True)
+            .execute()
+        )
+
+        result.append({
+            "cart": cart,
+            "items": items_response.data or []
+        })
+
+    return result

@@ -628,6 +628,58 @@ def is_explicit_auto_purchase_request(message: str) -> bool:
     )
 
 
+def is_auto_buy_price_followup(
+    user_message: str,
+    conversation_history: list
+) -> bool:
+    """
+    Detect a short price reply that continues a previous automatic-
+    purchase clarification. Example:
+
+        Assistant: What maximum price would you like to set?
+        User: Rs. 20,000
+
+    This keeps the follow-up inside the deterministic Smart Cart flow.
+    """
+
+    current = extract_smart_cart_arguments(user_message)
+
+    if current.get("maximum_price") is None:
+        return False
+
+    for message in reversed(conversation_history or []):
+        if not isinstance(message, dict):
+            continue
+
+        if message.get("role") != "assistant":
+            continue
+
+        content = message.get("content")
+
+        if not isinstance(content, str):
+            continue
+
+        text = content.lower().strip()
+
+        if not text:
+            continue
+
+        if (
+            "maximum price" in text
+            and (
+                "automatic purchase" in text
+                or "auto-buy" in text
+                or "automatically" in text
+            )
+        ):
+            return True
+
+        # Only the most recent meaningful assistant turn is relevant.
+        break
+
+    return False
+
+
 # -------------------------------------------------------------
 # SMART CART ARGUMENT EXTRACTION
 # -------------------------------------------------------------
@@ -771,7 +823,7 @@ def extract_smart_cart_arguments(message: str) -> dict:
         ),
         # bare "Rs. 20,000" / "PKR 5000" anywhere in the message.
         (
-            r"\b(?:rs\.?|pkr)\b\s*"
+            r"\b(?:rs\.?|pkr)\s*"
             r"([\d,]+(?:\.\d+)?)"
         ),
     ]
@@ -1305,8 +1357,12 @@ def run_smart_cart_workflow(
         conversation_history=conversation_history
     )
     
-    explicit_auto_buy = is_explicit_auto_purchase_request(
-        user_message
+    explicit_auto_buy = (
+        is_explicit_auto_purchase_request(user_message)
+        or is_auto_buy_price_followup(
+            user_message=user_message,
+            conversation_history=conversation_history
+        )
     )
 
     # ---------------------------------------------------------
@@ -2115,8 +2171,11 @@ def run_agent(
         )
     )
     smart_cart_action_required = (
-        is_smart_cart_action(
-            user_message
+        is_smart_cart_action(user_message)
+        or is_explicit_auto_purchase_request(user_message)
+        or is_auto_buy_price_followup(
+            user_message=user_message,
+            conversation_history=conversation_history
         )
     )
 
